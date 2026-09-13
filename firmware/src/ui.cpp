@@ -65,6 +65,16 @@ struct Layout {
     const lv_font_t* bt_device_font;
     const lv_font_t* bt_credit_1_font;
     const lv_font_t* bt_credit_2_font;
+
+    // Wide two-column layout (width >= 2x height, e.g. 640x180). One column
+    // per account, each with its own 5h / 7d rows and a "last updated" line.
+    bool    wide;
+    int16_t wide_col_w, wide_col_gap;
+    int16_t wide_row1_y, wide_row2_y;   // row tops inside the column panel
+    int16_t wide_bar_dy;                // bar top relative to the row top
+    int16_t wide_pct_x;                 // percentage label x (right of the pill)
+    const lv_font_t* name_font;         // account label
+    const lv_font_t* age_font;          // "updated 3m ago"
 };
 static Layout L = {};
 
@@ -175,6 +185,42 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_credit_2_font = &font_styrene_12;
     }
 
+    if (c.width >= 2 * c.height) {
+        // Wide layout — tuned for 640x180 (LilyGo T-Display-S3-Long in
+        // landscape). Overrides the height-picked branch above wholesale: two
+        // account columns side by side, no title row, status line only when
+        // there is nothing else to show.
+        L.wide = true;
+        L.margin = 6;
+        L.title_y = 0;
+        L.content_y = 0;
+        L.bar_h = 12;
+        L.panel_pad_x = 10;
+        L.panel_pad_y = 6;
+        L.pill_pad_x = 8;
+        L.pill_pad_y = 2;
+        L.pct_font   = &font_styrene_28;
+        L.pill_font  = &font_styrene_14;
+        L.reset_font = &font_styrene_14;
+        L.name_font  = &font_styrene_20;
+        L.age_font   = &font_styrene_14;
+        L.anim_font  = &font_mono_18;
+        L.anim_y = -4;
+        L.small_icons = true;
+        L.idle_px = 96;
+        L.pair_y1 = 14;
+        L.pair_y2 = 66;
+        L.pair_y3 = 96;
+        L.bt_status_font = &font_styrene_28;
+        L.bt_device_font = &font_styrene_16;
+        L.wide_col_gap = 12;
+        L.wide_col_w   = (c.width - 2 * L.margin - L.wide_col_gap) / 2;
+        L.wide_row1_y  = 28;
+        L.wide_row2_y  = 90;
+        L.wide_bar_dy  = 32;
+        L.wide_pct_x   = 46;
+    }
+
     L.content_w = L.scr_w - 2 * L.margin;
 }
 
@@ -216,6 +262,25 @@ static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
 static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
+
+// ---- Wide layout: one column per account ----
+struct AcctColumn {
+    lv_obj_t* panel;
+    lv_obj_t* lbl_name;
+    lv_obj_t* lbl_age;
+    lv_obj_t* lbl_s_pct;
+    lv_obj_t* lbl_s_reset;
+    lv_obj_t* bar_s;
+    lv_obj_t* lbl_w_pct;
+    lv_obj_t* lbl_w_reset;
+    lv_obj_t* bar_w;
+    int       age_base_s;   // host-reported age (s) at fetch time; -1 = unknown
+    bool      has_data;
+};
+static AcctColumn cols[MAX_ACCOUNTS] = {};
+static uint32_t acct_fetch_ms = 0;      // lv_tick when the last accounts payload landed
+static uint32_t age_last_ms   = 0;      // last "updated N ago" re-render
+#define AGE_REFRESH_MS 10000
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -414,6 +479,92 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
     return panel;
 }
 
+// ---- Wide layout builders ----
+
+static void make_wide_row(lv_obj_t* panel, int y, const char* pill_text,
+                          lv_obj_t** out_pct, lv_obj_t** out_reset, lv_obj_t** out_bar) {
+    lv_obj_t* pill = make_pill(panel, pill_text);
+    lv_obj_set_pos(pill, 0, y + 4);
+
+    *out_pct = lv_label_create(panel);
+    lv_label_set_text(*out_pct, "---%");
+    lv_obj_set_style_text_font(*out_pct, L.pct_font, 0);
+    lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
+    lv_obj_set_pos(*out_pct, L.wide_pct_x, y - 4);
+
+    *out_reset = lv_label_create(panel);
+    lv_label_set_text(*out_reset, "---");
+    lv_obj_set_style_text_font(*out_reset, L.reset_font, 0);
+    lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
+    // Persistent right alignment so the label stays flush right as its text changes.
+    lv_obj_set_align(*out_reset, LV_ALIGN_TOP_RIGHT);
+    lv_obj_set_pos(*out_reset, 0, y + 6);
+
+    *out_bar = make_bar(panel, 0, y + L.wide_bar_dy,
+                        L.wide_col_w - 2 * L.panel_pad_x, L.bar_h);
+}
+
+static void build_wide_columns(lv_obj_t* parent) {
+    const int panel_h = L.scr_h - 2 * L.margin;
+    for (int i = 0; i < MAX_ACCOUNTS; i++) {
+        AcctColumn* c = &cols[i];
+        const int x = L.margin + i * (L.wide_col_w + L.wide_col_gap);
+        c->panel = make_panel(parent, x, L.margin, L.wide_col_w, panel_h);
+
+        c->lbl_name = lv_label_create(c->panel);
+        lv_label_set_text(c->lbl_name, "Account");
+        lv_obj_set_style_text_font(c->lbl_name, L.name_font, 0);
+        lv_obj_set_style_text_color(c->lbl_name, COL_TEXT, 0);
+        lv_label_set_long_mode(c->lbl_name, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(c->lbl_name, L.wide_col_w / 2);
+        lv_obj_set_pos(c->lbl_name, 0, 0);
+
+        c->lbl_age = lv_label_create(c->panel);
+        lv_label_set_text(c->lbl_age, "no data");
+        lv_obj_set_style_text_font(c->lbl_age, L.age_font, 0);
+        lv_obj_set_style_text_color(c->lbl_age, COL_DIM, 0);
+        lv_obj_set_align(c->lbl_age, LV_ALIGN_TOP_RIGHT);
+        lv_obj_set_pos(c->lbl_age, 0, 4);
+
+        make_wide_row(c->panel, L.wide_row1_y, "5h", &c->lbl_s_pct, &c->lbl_s_reset, &c->bar_s);
+        make_wide_row(c->panel, L.wide_row2_y, "7d", &c->lbl_w_pct, &c->lbl_w_reset, &c->bar_w);
+        c->age_base_s = -1;
+        c->has_data = false;
+    }
+}
+
+// "updated N ago" — the freshness line. Age keeps counting locally between
+// payloads (host age + time since the payload landed) so a dead link or a
+// closed Claude Code session shows up as a growing number, not frozen data.
+static void format_age(long s, char* buf, size_t len) {
+    if (s < 0)          snprintf(buf, len, "no data");
+    else if (s < 90)    snprintf(buf, len, "updated just now");
+    else if (s < 3600)  snprintf(buf, len, "updated %ldm ago", s / 60);
+    else if (s < 86400) snprintf(buf, len, "updated %ldh %ldm ago", s / 3600, (s % 3600) / 60);
+    else                snprintf(buf, len, "updated %ldd ago", s / 86400);
+}
+
+static lv_color_t age_color(long s) {
+    if (s < 0)    return COL_RED;
+    if (s < 300)  return COL_DIM;
+    if (s < 1800) return COL_AMBER;
+    return COL_RED;
+}
+
+static void refresh_ages(uint32_t now) {
+    char buf[40];
+    for (int i = 0; i < MAX_ACCOUNTS; i++) {
+        AcctColumn* c = &cols[i];
+        if (!c->panel) continue;
+        long age = -1;
+        if (c->has_data && c->age_base_s >= 0)
+            age = (long)c->age_base_s + (long)((now - acct_fetch_ms) / 1000);
+        format_age(age, buf, sizeof(buf));
+        lv_label_set_text(c->lbl_age, buf);
+        lv_obj_set_style_text_color(c->lbl_age, age_color(age), 0);
+    }
+}
+
 // Pairing hint — shown when disconnected so the screen isn't empty and the
 // user knows how to (re)pair. Wording matches the 3-second release gesture.
 static void build_pair_group(lv_obj_t* parent) {
@@ -498,6 +649,10 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
+    if (L.wide) {
+        lv_obj_add_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);   // no title row at 180px tall
+        build_wide_columns(usage_group);
+    } else {
     panel_session = make_usage_panel(usage_group, L.content_y, "Current",
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
@@ -528,6 +683,7 @@ static void init_usage_screen(lv_obj_t* scr) {
                      &bar_weekly, &lbl_weekly_reset);
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
+    }
 
     build_pair_group(usage_container);
     build_idle_group(usage_container);
@@ -565,7 +721,8 @@ void ui_init(void) {
 
     // Corner mascot in the old logo slot. The still Clawd is shorter than the
     // 80/40 px slot the spark logo used; center it vertically in that slot.
-    {
+    // The wide layout has no free corner — both columns fill the panel.
+    if (!L.wide) {
         const int slot  = L.small_icons ? LOGO_SMALL_HEIGHT : LOGO_HEIGHT;
         const int art_h = L.small_icons ? CLAWD_STILL_SMALL_H : CLAWD_STILL_H;
         const int top   = L.logo_y + (slot - art_h) / 2;
@@ -583,8 +740,9 @@ void ui_init(void) {
     lv_image_set_src(battery_img, &battery_dscs[0]);
     lv_obj_set_pos(battery_img, L.scr_w - L.batt_w - L.margin, L.batt_y);
     // Boards without battery telemetry never show the indicator (per the HAL
-    // contract; previously every board drew the empty-battery glyph).
-    if (!board_caps().has_battery) {
+    // contract; previously every board drew the empty-battery glyph). The wide
+    // layout has no header strip to put it in either.
+    if (!board_caps().has_battery || L.wide) {
         lv_obj_del(battery_img);
         battery_img = nullptr;
     }
@@ -606,6 +764,8 @@ void ui_update(const UsageData* data) {
         clock_last_min = -1;
         lv_label_set_text(lbl_title, "Usage");
     }
+
+    if (L.wide) return;   // columns are fed by ui_update_accounts()
 
     int s_pct = (int)(data->session_pct + 0.5f);
 
@@ -675,6 +835,48 @@ void ui_update(const UsageData* data) {
     }
 }
 
+void ui_update_accounts(const UsageData* accts, int count) {
+    if (!L.wide) return;
+    acct_fetch_ms = lv_tick_get();
+    char buf[48];
+    for (int i = 0; i < MAX_ACCOUNTS; i++) {
+        AcctColumn* c = &cols[i];
+        if (!c->panel) continue;
+        if (i >= count || !accts[i].valid) {
+            c->has_data = false;
+            c->age_base_s = -1;
+            lv_label_set_text(c->lbl_name, "--");   // no account in this slot
+            lv_label_set_text(c->lbl_s_pct, "---%");
+            lv_label_set_text(c->lbl_w_pct, "---%");
+            lv_label_set_text(c->lbl_s_reset, "---");
+            lv_label_set_text(c->lbl_w_reset, "---");
+            lv_bar_set_value(c->bar_s, 0, LV_ANIM_OFF);
+            lv_bar_set_value(c->bar_w, 0, LV_ANIM_OFF);
+            continue;
+        }
+        const UsageData* d = &accts[i];
+        c->has_data = true;
+        c->age_base_s = d->age_s;
+        lv_label_set_text(c->lbl_name, d->label[0] ? d->label : "Account");
+
+        int s_pct = (int)(d->session_pct + 0.5f);
+        lv_label_set_text_fmt(c->lbl_s_pct, "%d%%", s_pct);
+        lv_bar_set_value(c->bar_s, s_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(c->bar_s, pct_color(d->session_pct), LV_PART_INDICATOR);
+        format_reset_time(d->session_reset_mins, buf, sizeof(buf));
+        lv_label_set_text(c->lbl_s_reset, buf);
+
+        int w_pct = (int)(d->weekly_pct + 0.5f);
+        lv_label_set_text_fmt(c->lbl_w_pct, "%d%%", w_pct);
+        lv_bar_set_value(c->bar_w, w_pct, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(c->bar_w, pct_color(d->weekly_pct), LV_PART_INDICATOR);
+        format_reset_time(d->weekly_reset_mins, buf, sizeof(buf));
+        lv_label_set_text(c->lbl_w_reset, buf);
+    }
+    age_last_ms = acct_fetch_ms;
+    refresh_ages(acct_fetch_ms);
+}
+
 // Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
 // (connected but data has gone stale), or the live usage panels. Only re-lays-out
 // on an actual change. The animated status line stays visible everywhere — it
@@ -696,6 +898,12 @@ static void update_view_state(void) {
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
                       LV_OBJ_FLAG_HIDDEN);
+    // Wide layout: the columns fill the whole panel, so the whimsical status
+    // line only shows on the pairing / idle views where there is room for it.
+    if (L.wide && lbl_anim) {
+        if (v == 2) lv_obj_add_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+        else        lv_obj_clear_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void ui_tick_anim(void) {
@@ -704,6 +912,12 @@ void ui_tick_anim(void) {
     if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
 
     uint32_t now = lv_tick_get();
+
+    // Wide layout: keep the "updated N ago" lines counting between payloads.
+    if (L.wide && acct_fetch_ms && now - age_last_ms >= AGE_REFRESH_MS) {
+        age_last_ms = now;
+        refresh_ages(now);
+    }
 
     // Title clock: once the daemon has sent wall-clock time, replace "Usage" with
     // the live time, advanced locally so it ticks every minute between payloads.

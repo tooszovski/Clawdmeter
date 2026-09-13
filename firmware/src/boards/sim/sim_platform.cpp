@@ -1,7 +1,9 @@
 #include "sim_platform.h"
 #include <SDL.h>
 #include <Arduino.h>
+#include "../../ui.h"
 #include <stdlib.h>
+#include <string.h>
 
 static bool quit = false;
 
@@ -59,6 +61,19 @@ void sim_pump(void) {
     if (pwr_down && !pwr_long_fired && millis() - pwr_down_ms >= PWR_LONG_MS) {
         pwr_long_fired = true;
         edge_long = true;
+    }
+
+    // Headless hook: SIM_START_SCREEN=usage → leave the boot splash for the
+    // usage view once (after the first payload had time to land), so
+    // autoshots can capture the data screens without a mouse tap.
+    static int start_screen = -2;
+    if (start_screen == -2) {
+        const char* v = getenv("SIM_START_SCREEN");
+        start_screen = (v && strcmp(v, "usage") == 0) ? 1 : -1;
+    }
+    if (start_screen == 1 && millis() >= 300) {
+        if (ui_get_current_screen() == SCREEN_SPLASH) ui_show_screen(SCREEN_USAGE);
+        start_screen = -1;
     }
 
     // Headless CI hook: SIM_AUTOSHOT_MS=<ms> → screenshot + exit.

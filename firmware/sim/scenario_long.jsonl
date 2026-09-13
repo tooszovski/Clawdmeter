@@ -1,0 +1,7 @@
+# Two-account scenario for the 640x180 wide layout (sim_long env).
+# Payload = daemon `source = statusline` format: legacy top-level fields mirror
+# the active account ("a"), "accounts" carries one entry per column.
+{"name":"two accounts, fresh","hold_ms":4000,"s":6,"sr":216,"w":1,"wr":8640,"st":"allowed","acct":"pro","ok":true,"a":0,"accounts":[{"k":"tuzyakin","s":6,"sr":216,"w":1,"wr":8640,"age":40},{"k":"Redmadrobot","s":42,"sr":120,"w":33,"wr":5000,"age":600}],"t":1789348071,"tf":24}
+{"name":"work heavy, personal stale","hold_ms":4000,"s":91,"sr":25,"w":77,"wr":2400,"st":"allowed","acct":"pro","ok":true,"a":1,"accounts":[{"k":"tuzyakin","s":12,"sr":180,"w":3,"wr":8000,"age":5400},{"k":"Redmadrobot","s":91,"sr":25,"w":77,"wr":2400,"age":30}]}
+{"name":"single account only","hold_ms":4000,"s":55,"sr":90,"w":20,"wr":6000,"st":"allowed","acct":"pro","ok":true,"a":0,"accounts":[{"k":"tuzyakin","s":55,"sr":90,"w":20,"wr":6000,"age":70}]}
+{"name":"no data beat","hold_ms":3000,"ok":false}

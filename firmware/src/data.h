@@ -16,4 +16,12 @@ struct UsageData {
     int  clock_fmt;          // 12 or 24 (hour format from daemon); defaults to 24
     bool ok;                 // data parse succeeded
     bool valid;              // false until first successful parse
+    // Multi-account payloads ("accounts":[...]) fill one UsageData per
+    // account with the two fields below; single-account payloads leave them
+    // empty / -1.
+    char label[16];          // account label shown as the column header
+    int  age_s;              // seconds since the host last refreshed this account; -1 = unknown
 };
+
+// Max accounts the wide two-column layout can show side by side.
+#define MAX_ACCOUNTS 2

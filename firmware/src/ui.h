@@ -10,6 +10,9 @@ enum screen_t {
 
 void ui_init(void);
 void ui_update(const UsageData* data);
+// Per-account columns (wide layouts only; a no-op elsewhere). `accounts` holds
+// `count` entries in stable display order, each with label + age_s filled.
+void ui_update_accounts(const UsageData* accounts, int count);
 void ui_tick_anim(void);
 void ui_show_screen(screen_t screen);
 void ui_toggle_splash(void);

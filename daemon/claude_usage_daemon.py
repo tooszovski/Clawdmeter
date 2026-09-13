@@ -591,6 +591,143 @@ async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict | None
     return payload
 
 
+# --- statusline source -------------------------------------------------------
+#
+# Alternative data source that never touches the Anthropic API: Claude Code's
+# own statusLine hook receives `rate_limits` on stdin every refresh, and
+# host/statusline-export.js snapshots that block to STATE_DIR/<account>.json.
+# This daemon then only forwards files -> BLE. Enabled with `source =
+# statusline` in the config file. Every account file becomes one entry in the
+# payload's "accounts" array (stable order: `accounts = k1, k2` from the
+# config, then alphabetical); the legacy top-level fields mirror the account
+# updated most recently so single-column firmware keeps working unchanged.
+STATE_DIR = Path.home() / ".local" / "state" / "clawdmeter"
+LABEL_MAX = 12
+
+
+def read_config_value(key: str, default: str = "") -> str:
+    """Read one `key = value` option from the config file (last wins)."""
+    val = default
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip().lower() == key:
+                    val = v.strip()
+    except OSError:
+        pass
+    return val
+
+
+def read_source_setting() -> str:
+    """Data source: `api` (poll Anthropic with the CLI token) or `statusline`."""
+    v = read_config_value("source", "api").lower()
+    return v if v in ("api", "statusline") else "api"
+
+
+def read_accounts_order() -> list[str]:
+    raw = read_config_value("accounts", "")
+    return [k.strip().lower() for k in raw.split(",") if k.strip()]
+
+
+def _reset_minutes_from_epoch(reset_ts, now: float) -> int:
+    try:
+        r = float(reset_ts)
+    except (TypeError, ValueError):
+        return -1
+    if r <= 0:
+        return -1
+    mins = (r - now) / 60.0
+    return int(round(mins)) if mins > 0 else 0
+
+
+def _pct_int(v) -> int:
+    try:
+        return max(0, min(100, int(round(float(v)))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def read_statusline_payload(now: float | None = None) -> tuple[dict | None, bool]:
+    """Build the BLE payload from STATE_DIR files. Returns (payload, no_data).
+
+    no_data is True when the directory holds no readable account file at all.
+    Stale files are still sent — each account carries "age" (seconds since the
+    hook last wrote it) so the firmware can show how fresh the numbers are.
+    """
+    if now is None:
+        now = time.time()
+    records: dict[str, dict] = {}
+    try:
+        files = sorted(STATE_DIR.glob("*.json"))
+    except OSError:
+        files = []
+    for f in files:
+        try:
+            rec = json.loads(f.read_text())
+        except (OSError, ValueError) as e:
+            log(f"Skipping {f.name}: {e}")
+            continue
+        if not isinstance(rec, dict):
+            continue
+        key = str(rec.get("key") or f.stem).lower()
+        records[key] = rec
+    if not records:
+        return None, True
+
+    order = read_accounts_order()
+    keys = [k for k in order if k in records] + sorted(k for k in records if k not in order)
+
+    accounts = []
+    for k in keys:
+        rec = records[k]
+        five = rec.get("five_hour") or {}
+        seven = rec.get("seven_day") or {}
+        try:
+            updated = float(rec.get("updated") or 0)
+        except (TypeError, ValueError):
+            updated = 0.0
+        age = int(now - updated) if updated > 0 else -1
+        label = str(rec.get("label") or k)[:LABEL_MAX]
+        accounts.append({
+            "k": label,
+            "s": _pct_int(five.get("used_percentage")),
+            "sr": _reset_minutes_from_epoch(five.get("resets_at"), now),
+            "w": _pct_int(seven.get("used_percentage")),
+            "wr": _reset_minutes_from_epoch(seven.get("resets_at"), now),
+            "age": age,
+        })
+
+    # Active = the account whose file was written most recently (the Claude
+    # Code you are actually typing into refreshes its status line).
+    def _upd(i: int) -> float:
+        try:
+            return float(records[keys[i]].get("updated") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    active = max(range(len(accounts)), key=_upd)
+    a = accounts[active]
+    payload = {
+        "s": a["s"], "sr": a["sr"], "w": a["w"], "wr": a["wr"],
+        "st": "allowed", "acct": "pro", "ok": True,
+        "a": active,
+        "accounts": accounts,
+    }
+    add_chime_field(payload)
+    add_clock_fields(payload)
+    return payload, False
+
+
+async def poll_source() -> tuple[dict | None, bool]:
+    """Dispatch on the configured data source. Same contract as poll_active."""
+    if read_source_setting() == "statusline":
+        return read_statusline_payload()
+    return await poll_active()
+
+
 class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
@@ -766,7 +903,7 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                 # OAuth endpoint's rate limit (429). When no dir has a usable token
                 # we signal "No data" so the device idles instead of holding stale
                 # numbers until the CLI re-seeds it.
-                payload, dead = await poll_active()
+                payload, dead = await poll_source()
                 if payload is not None:
                     if await session.write_payload(payload):
                         last_poll = time.time()
@@ -777,8 +914,9 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     # last_poll on the write result (like the data path) so a
                     # failed beat retries next tick instead of throttling what may
                     # be a healthy link for a full POLL_INTERVAL.
-                    log("No usable token; signalling no-data to device — run "
-                        "`claude login` or use the CLI to let Claude Code renew it")
+                    log("No usable data source; signalling no-data to device — "
+                        "run `claude login` (api) or open a Claude Code session "
+                        "so the statusline hook writes usage files (statusline)")
                     if await session.write_payload({"ok": False}):
                         last_poll = time.time()
                 else:
@@ -816,6 +954,7 @@ async def main() -> None:
 
     log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
+    log(f"Data source: {read_source_setting()}")
 
     backoff = 1
     skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle

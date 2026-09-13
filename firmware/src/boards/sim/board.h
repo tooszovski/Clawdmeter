@@ -25,6 +25,14 @@
 // screenshot (SIM_AUTOSHOT_PATH, default sim-autoshot.bmp) after <ms> and
 // exits.
 
-#define BOARD_NAME  "Simulator 480x480"
+// Geometry defaults to the 480x480 AMOLED; other envs override LCD_WIDTH /
+// LCD_HEIGHT via build flags (e.g. `sim_long` = 640x180 for the T-Display-S3-Long).
+#ifndef LCD_WIDTH
 #define LCD_WIDTH   480
+#endif
+#ifndef LCD_HEIGHT
 #define LCD_HEIGHT  480
+#endif
+#ifndef BOARD_NAME
+#define BOARD_NAME  "Simulator"
+#endif

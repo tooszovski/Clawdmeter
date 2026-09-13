@@ -32,6 +32,7 @@ Boards supported out of the box:
 - [Waveshare ESP32-S3-Touch-AMOLED-2.06](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm?&aff_id=149786)
 - [Waveshare ESP32-S3-Touch-LCD-1.54](https://www.waveshare.com/esp32-s3-lcd-1.54.htm?sku=33869&aff_id=149786)
 - [Waveshare ESP32-S3-Touch-LCD-4](https://www.waveshare.com/esp32-s3-touch-lcd-4.htm)
+- [LilyGo T-Display-S3-Long](https://lilygo.cc/products/t-display-s3-long) — 3.4" 180×640 bar, used in landscape (640×180) with a two-account column layout (`lilygo_tdisplay_s3_long`)
 
 > Please check if a pull request exists for your alternative hardware port before opening a new one, providing QA feedback and testing on the same hardware is more valuable than duplicate pull requests.
 

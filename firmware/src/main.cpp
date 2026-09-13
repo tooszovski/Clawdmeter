@@ -22,6 +22,11 @@
 #include "hal/sound_hal.h"
 
 static UsageData usage = {};
+// Per-account slices of a multi-account payload (see parse_json). The legacy
+// top-level fields in `usage` mirror the active account, so single-column
+// layouts keep working; wide layouts render `accounts[]` side by side.
+static UsageData accounts[MAX_ACCOUNTS] = {};
+static int account_count = 0;
 
 // ---- LVGL draw buffers (partial render mode) ----
 // PSRAM-equipped boards (S3) can comfortably hold larger strips. PSRAM-free
@@ -121,11 +126,36 @@ static bool parse_json(const char* json, UsageData* out) {
     out->clock_fmt = doc["tf"] | 24;
     out->ok = doc["ok"] | false;
     out->valid = true;
+    out->label[0] = '\0';
+    out->age_s = -1;
+
+    // Optional multi-account block: "accounts":[{"k","s","sr","w","wr","age"},...]
+    account_count = 0;
+    JsonArrayConst arr = doc["accounts"].as<JsonArrayConst>();
+    if (!arr.isNull()) {
+        for (JsonObjectConst a : arr) {
+            if (account_count >= MAX_ACCOUNTS) break;
+            UsageData* d = &accounts[account_count];
+            *d = {};
+            strlcpy(d->label, a["k"] | "", sizeof(d->label));
+            d->session_pct = a["s"] | 0.0f;
+            d->session_reset_mins = a["sr"] | -1;
+            d->weekly_pct = a["w"] | 0.0f;
+            d->weekly_reset_mins = a["wr"] | -1;
+            d->age_s = a["age"] | -1;
+            strlcpy(d->status, "allowed", sizeof(d->status));
+            d->clock_fmt = out->clock_fmt;
+            d->ok = true;
+            d->valid = true;
+            account_count++;
+        }
+    }
     return true;
 }
 
 // ---- Serial command buffer ----
-#define CMD_BUF_SIZE 64
+// Sized to take a full `json <payload>` line (QA injection, see handle_payload).
+#define CMD_BUF_SIZE 512
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
 
@@ -167,6 +197,30 @@ static void send_screenshot() {
 #endif
 }
 
+// One usage payload (from BLE, or injected over serial for QA): parse, feed the
+// usage-rate tracker, chime on a session reset, and push to the UI.
+static bool handle_payload(const char* json) {
+    if (!parse_json(json, &usage)) return false;
+    int g_before = usage_rate_group();
+    bool session_reset = usage_rate_sample(usage.session_pct);
+    int g_after = usage_rate_group();
+    // 5-hour session limit refilled → chime so the user knows they can
+    // use Claude again (no-op on boards without a buzzer). Gated on the
+    // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
+    if (session_reset && usage.chime) {
+        Serial.println("session reset detected — chime");
+        sound_hal_play_reset();
+    }
+    if (g_after != g_before) {
+        Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+            g_before, g_after, usage.session_pct);
+        if (splash_is_active()) splash_pick_for_current_rate();
+    }
+    ui_update(&usage);
+    if (account_count > 0) ui_update_accounts(accounts, account_count);
+    return true;
+}
+
 static void check_serial_cmd() {
     while (Serial.available()) {
         char c = Serial.read();
@@ -174,6 +228,13 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
+            else if (strcmp(cmd_buf, "toggle") == 0) ui_toggle_splash();   // QA: splash <-> usage without touch
+            else if (strcmp(cmd_buf, "link") == 0) {                       // QA: pretend the host is connected
+                ui_update_ble_status(BLE_STATE_CONNECTED, ble_get_device_name(), ble_get_mac_address());
+            }
+            else if (strncmp(cmd_buf, "json ", 5) == 0) {                  // QA: inject a daemon payload
+                Serial.println(handle_payload(cmd_buf + 5) ? "JSON_OK" : "JSON_ERR");
+            }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -372,27 +433,8 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
-            int g_before = usage_rate_group();
-            bool session_reset = usage_rate_sample(usage.session_pct);
-            int g_after = usage_rate_group();
-            // 5-hour session limit refilled → chime so the user knows they can
-            // use Claude again (no-op on boards without a buzzer). Gated on the
-            // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_play_reset();
-            }
-            if (g_after != g_before) {
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
-                if (splash_is_active()) splash_pick_for_current_rate();
-            }
-            ui_update(&usage);
-            ble_send_ack();
-        } else {
-            ble_send_nack();
-        }
+        if (handle_payload(ble_get_data())) ble_send_ack();
+        else                                ble_send_nack();
     }
 
     delay(5);
