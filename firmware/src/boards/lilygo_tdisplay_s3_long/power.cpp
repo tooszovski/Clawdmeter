@@ -18,6 +18,8 @@
 //     rail switch on this board); BOOT press wakes it.
 
 #define BATTERY_POLL_MS  2000
+#define CHARGE_HOLD_MS   30000
+static uint32_t last_charging_ms = 0;
 #define CHARGER_POLL_MS  1000
 #define PWR_POLL_MS      50
 #define PWR_LONG_MS      1500
@@ -37,6 +39,13 @@ static uint32_t last_battery_ms   = 0;
 static uint32_t last_charger_ms   = 0;
 static uint32_t last_pwr_ms       = 0;
 
+static bool sy6970_write(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(SY6970_ADDR);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+
 static bool sy6970_read(uint8_t reg, uint8_t* out) {
     Wire.beginTransmission(SY6970_ADDR);
     Wire.write(reg);
@@ -52,16 +61,58 @@ static void sample_charger(void) {
     charger_ok = true;
     vbus_in  = ((st >> 5) & 0x07) != 0;
     uint8_t chrg = (st >> 3) & 0x03;
-    charging = (chrg == 1 || chrg == 2);
+    const bool charging_now = (chrg == 1 || chrg == 2);
+    if (charging_now) last_charging_ms = millis();
+    charging = charging_now || (last_charging_ms && millis() - last_charging_ms < CHARGE_HOLD_MS);
 }
 
-static void sample_battery(void) {
+// Battery voltage sources:
+//   * SY6970 ADC (preferred): REG0E bits 6:0, VBAT = 2.304 V + 20 mV/LSB, with
+//     continuous conversion enabled in power_hal_init (REG02 CONV_START|CONV_RATE).
+//   * GPIO2 divider (fallback when the charger does not answer): noisy on this
+//     board — readings wandered 25..99 % within an hour even with a battery.
+// The percentage is smoothed (EMA) so the glyph doesn't flicker between steps.
+static float vbat_divider(void) {
     uint32_t mv = 0;
-    for (int i = 0; i < 4; i++) mv += analogReadMilliVolts(BAT_ADC_PIN);
-    float vbat = (mv / 4) * BAT_VOLT_DIVIDER / 1000.0f;
-    if (vbat < 3.0f) { cached_pct = -1; return; }   // divider floating — no battery
-    int pct = (int)((vbat - 3.3f) * (100.0f / 0.9f) + 0.5f);
-    cached_pct = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+    for (int i = 0; i < 8; i++) mv += analogReadMilliVolts(BAT_ADC_PIN);
+    return (mv / 8) * BAT_VOLT_DIVIDER / 1000.0f;
+}
+
+static bool vbat_charger(float* out) {
+    uint8_t v;
+    if (!charger_ok || !sy6970_read(0x0E, &v)) return false;
+    *out = 2.304f + 0.020f * (v & 0x7F);
+    return true;
+}
+
+// On this board the SY6970 cycles charge -> done -> off every few seconds and
+// VBAT swings 3.8..4.2 V with it (both ADCs agree). The indicator therefore
+// uses a slow EMA (~40 s at the 2 s sample rate) plus a 3-point hysteresis on
+// the displayed percentage, and "charging" is held for CHARGE_HOLD_MS after
+// the last charging report so the glyph doesn't flicker.
+static float    vbat_smooth = 0.0f;
+static int      shown_pct = -1;
+
+static void sample_battery(void) {
+    float vbat;
+    if (!vbat_charger(&vbat)) vbat = vbat_divider();
+    if (vbat < 3.0f) { cached_pct = -1; shown_pct = -1; vbat_smooth = 0.0f; return; }   // no battery
+    vbat_smooth = (vbat_smooth == 0.0f) ? vbat : vbat_smooth + 0.05f * (vbat - vbat_smooth);
+    // Coarse Li-ion curve: 3.3 V = 0 %, 3.7 V = 50 %, 4.2 V = 100 %.
+    const float v = vbat_smooth;
+    int pct = (v < 3.7f) ? (int)((v - 3.3f) * (50.0f / 0.4f) + 0.5f)
+                         : (int)(50.0f + (v - 3.7f) * (50.0f / 0.5f) + 0.5f);
+    pct = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+    if (shown_pct < 0 || abs(pct - shown_pct) >= 3 || pct == 100 || pct == 0) shown_pct = pct;
+    cached_pct = shown_pct;
+}
+
+// Serial `bat`: both raw sources side by side.
+void power_debug_print(void) {
+    float vc = 0; bool okc = vbat_charger(&vc);
+    uint8_t st = 0; sy6970_read(0x0B, &st);
+    Serial.printf("bat: charger %s %.3fV | divider %.3fV | smooth %.3fV -> %d%%  REG0B=0x%02X vbus=%d charging=%d\n",
+        okc ? "OK" : "n/a", vc, vbat_divider(), vbat_smooth, cached_pct, st, vbus_in ? 1 : 0, charging ? 1 : 0);
 }
 
 static void power_off(void) {
@@ -78,6 +129,11 @@ void power_hal_init(void) {
     pinMode(BTN_PWR_GPIO, INPUT_PULLUP);
     analogReadResolution(12);
     sample_charger();
+    if (charger_ok) {
+        uint8_t r2;
+        if (sy6970_read(0x02, &r2)) sy6970_write(0x02, r2 | 0xC0);   // ADC on, continuous (1 s)
+        delay(50);
+    }
     sample_battery();
     Serial.printf("Power: SY6970 %s, vbus=%d charging=%d, battery=%d%%\n",
         charger_ok ? "OK" : "not found", vbus_in ? 1 : 0, charging ? 1 : 0, cached_pct);

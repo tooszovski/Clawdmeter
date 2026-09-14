@@ -96,6 +96,7 @@ void touch_hal_init(void) {
 static bool dbg_poll = false;
 int  display_debug_set_mode(int m);
 void display_debug_log(bool on);
+void power_debug_print(void);   // power.cpp (C++ linkage — declared outside the extern "C" body)
 extern "C" bool board_debug_cmd(const char* cmd) {
     if (strncmp(cmd, "disp ", 5) == 0) {
         int m = display_debug_set_mode(atoi(cmd + 5));
@@ -104,6 +105,7 @@ extern "C" bool board_debug_cmd(const char* cmd) {
     }
     if (strcmp(cmd, "displog") == 0) { static bool on = false; on = !on; display_debug_log(on); Serial.printf("display log %d\n", on); return true; }
     if (strcmp(cmd, "redraw") == 0) { lv_obj_invalidate(lv_screen_active()); Serial.println("redraw"); return true; }
+    if (strcmp(cmd, "bat") == 0) { power_debug_print(); return true; }
     if (strcmp(cmd, "reboot") == 0) { Serial.println("rebooting"); Serial.flush(); delay(50); ESP.restart(); return true; }
     if (strcmp(cmd, "i2cscan") == 0) {
         Serial.print("i2c:");
