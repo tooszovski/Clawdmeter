@@ -79,6 +79,9 @@ function exportUsage(data) {
     updated: Math.floor(Date.now() / 1000),
     five_hour: five,
     seven_day: seven,
+    // Everything else Claude Code reports (model-specific weekly buckets etc.),
+    // kept verbatim so the daemon can pick extra buckets without a hook change.
+    rate_limits: rl,
   };
   fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   const file = path.join(STATE_DIR, `${acct.key}.json`);

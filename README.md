@@ -47,21 +47,27 @@ Boards supported out of the box:
 - Windows: `python3` 3.11+ (the installer sets up a venv with `bleak`, `httpx`, and `pystray`)
 - Claude Code with an active subscription
 
-## Statusline source (no API calls)
+## No-API data sources: `usage` and `statusline`
 
-Instead of polling the Anthropic API with your OAuth token, the daemon can read
-the `rate_limits` block Claude Code already hands to its `statusLine` command.
-`host/statusline-export.js` wraps your status-line script, snapshots that block
-to `~/.local/state/clawdmeter/<account>.json`, and the daemon forwards the
-files over BLE (`source = statusline` in the config). Two Claude Code installs
-selected with `CLAUDE_CONFIG_DIR` give two files, shown side by side on wide
-displays with an "updated N ago" freshness line. Details and the payload
-format: [`docs/statusline-source.md`](docs/statusline-source.md).
+Instead of polling the Anthropic API with your OAuth token, the daemon can ask
+Claude Code itself:
+
+- `source = usage` runs `claude -p /usage` in each configured `config_dirs`
+  entry and parses Claude Code's own report — works with no session open,
+  spends no tokens, and includes the model-scoped weekly window
+  ("Current week (Fable)"), shown as a third row per column on wide displays.
+- `source = statusline` reads the `rate_limits` block Claude Code hands to its
+  `statusLine` command, snapshotted by `host/statusline-export.js` to
+  `~/.local/state/clawdmeter/<account>.json`.
+
+Two Claude Code installs selected with `CLAUDE_CONFIG_DIR` become two columns
+side by side, each with an "updated N ago" freshness line. Details and the
+payload format: [`docs/statusline-source.md`](docs/statusline-source.md).
 
 macOS one-shot setup (venv, config, LaunchAgent, optional `settings.json` patch):
 
 ```bash
-./install-statusline-mac.sh --accounts "personal, work" --patch-settings
+./install-statusline-mac.sh --source usage --config-dirs "~/.claude, ~/.claude-work" --accounts "personal, work"
 ```
 
 ## macOS installation

@@ -1,4 +1,33 @@
-# Statusline data source (no API calls)
+# Statusline / usage data sources (no API calls)
+
+Two ways to feed the display without the daemon ever calling the Anthropic API
+itself. Both put one column per account on wide displays.
+
+| `source =`   | How                                                      | Refreshes                       | Model weekly (Fable/Opus) |
+|--------------|----------------------------------------------------------|---------------------------------|---------------------------|
+| `usage`      | daemon runs `claude -p /usage --output-format json` in each `config_dirs` entry | always (no session needed) | yes, third row |
+| `statusline` | Claude Code's statusLine hook writes files via `host/statusline-export.js` | only while a session for that account is open | no |
+
+`usage` is the recommended one; `statusline` files are still read for their
+exact `resets_at` epochs when they are fresh. Payload fields per account:
+`k` label, `s`/`sr` session % and minutes to reset, `w`/`wr` weekly, `age`
+seconds since the numbers were obtained, and optionally `m`/`mw`/`mwr` for the
+model-scoped weekly window.
+
+## `usage` source
+
+```ini
+source = usage
+config_dirs = ~/.claude, ~/.claude-work   # one column each
+accounts = personal, work                 # optional column order (account keys)
+clock = 24
+```
+
+`claude -p /usage` is Claude Code's own command (its client, its token, its
+5-minute cache); the daemon only parses the three "Current …" lines. It runs
+once per poll (60 s) per config dir and takes about a second.
+
+## `statusline` source (hook files)
 
 By default the daemon polls `api.anthropic.com` with the Claude Code OAuth
 token. The `statusline` source replaces that with data Claude Code already

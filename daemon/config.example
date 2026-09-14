@@ -9,15 +9,22 @@
 # Where the usage numbers come from.
 #   api        = poll api.anthropic.com with the Claude Code OAuth token (default,
 #                the original behaviour; see README "How it works")
+#   usage      = never call the API yourself: run `claude -p /usage` in every
+#                dir listed in `config_dirs` and parse Claude Code's own report.
+#                Works with no session open, spends no tokens, and includes the
+#                model-scoped weekly window (e.g. "Current week (Fable)"), shown
+#                as a third row per column on wide displays. Needs the `claude`
+#                CLI on PATH (or ~/.local/bin/claude).
 #   statusline = never call the API: read the files that Claude Code's own
 #                statusLine hook writes through host/statusline-export.js
 #                (~/.local/state/clawdmeter/<account>.json). Every account file
 #                becomes a column on wide displays; the legacy single-account
-#                fields mirror the account refreshed most recently.
-#                Setup: docs/statusline-source.md (macOS: ./install-statusline-mac.sh)
+#                fields mirror the account refreshed most recently. Only
+#                refreshes while a session for that account is open.
+#                Setup for both: docs/statusline-source.md (macOS: ./install-statusline-mac.sh)
 source = api
 
-# statusline source only: column order on wide displays. Account keys are the
+# usage / statusline sources: column order on wide displays. Account keys are the
 # file names in ~/.local/state/clawdmeter (organization name for team plans,
 # e-mail local part otherwise, lower-cased). Unlisted accounts follow, sorted.
 # accounts = personal, work

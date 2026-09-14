@@ -623,9 +623,10 @@ def read_config_value(key: str, default: str = "") -> str:
 
 
 def read_source_setting() -> str:
-    """Data source: `api` (poll Anthropic with the CLI token) or `statusline`."""
+    """Data source: `api` (poll Anthropic with the CLI token), `statusline`
+    (hook-written files) or `usage` (`claude -p /usage` per config dir)."""
     v = read_config_value("source", "api").lower()
-    return v if v in ("api", "statusline") else "api"
+    return v if v in ("api", "statusline", "usage") else "api"
 
 
 def read_accounts_order() -> list[str]:
@@ -721,10 +722,189 @@ def read_statusline_payload(now: float | None = None) -> tuple[dict | None, bool
     return payload, False
 
 
+# --- `claude -p /usage` source ------------------------------------------------
+#
+# Claude Code's own /usage command works non-interactively and prints the plan
+# windows it fetched itself (its client, its token, its cache — no session has
+# to be open and no tokens are spent):
+#
+#   Current session: 35% used · resets Sep 14 at 2:49pm (Europe/Moscow)
+#   Current week (all models): 8% used · resets Sep 20 at 10:59am (Europe/Moscow)
+#   Current week (Fable): 16% used · resets Sep 20 at 10:59am (Europe/Moscow)
+#
+# One run per configured config dir (`config_dirs`), so two accounts give two
+# columns, and the model-scoped weekly window (Fable / Opus / Sonnet) rides
+# along as "m"/"mw"/"mwr". When a statusline file exists for the account its
+# exact resets_at epochs are preferred over the parsed clock text.
+USAGE_CMD_TIMEOUT = 60
+_USAGE_LINE = re.compile(
+    r"^Current (?P<kind>session|week \((?P<scope>[^)]+)\)):\s*(?P<pct>\d+)% used"
+    r"(?:\s*·\s*resets\s+(?P<reset>.+?))?\s*$", re.M)
+# "Sep 20 at 10:59am (Europe/Moscow)"; minutes are dropped on the hour
+# ("Sep 21 at 6am"), and a 24 h "Sep 20 at 10:59" form is accepted too.
+_RESET_TXT = re.compile(
+    r"^(?P<mon>[A-Z][a-z]{2}) (?P<day>\d{1,2}) at (?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ampm>am|pm|AM|PM)?"
+    r"(?: \((?P<tz>[^)]+)\))?$")
+
+
+def _parse_reset_text(txt: str, now: float) -> int:
+    """'Sep 20 at 10:59am (Europe/Moscow)' -> minutes from now (-1 if unparseable)."""
+    m = _RESET_TXT.match(txt.strip())
+    if not m:
+        log(f"/usage: unparsed reset text {txt.strip()!r}")
+        return -1
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(m.group("tz")) if m.group("tz") else None
+    except Exception:
+        tz = None
+    try:
+        month = datetime.datetime.strptime(m.group("mon"), "%b").month
+        ampm = (m.group("ampm") or "").lower()
+        hour = int(m.group("h"))
+        if ampm:
+            hour = hour % 12 + (12 if ampm == "pm" else 0)
+        base = datetime.datetime.fromtimestamp(now, tz)
+        dt = base.replace(month=month, day=int(m.group("day")), hour=hour,
+                          minute=int(m.group("m") or 0), second=0, microsecond=0)
+        # The text carries no year: a date already >30 days in the past means next year.
+        if (base - dt).total_seconds() > 30 * 86400:
+            dt = dt.replace(year=dt.year + 1)
+        mins = (dt.timestamp() - now) / 60.0
+        return int(round(mins)) if mins > 0 else 0
+    except (ValueError, OverflowError):
+        return -1
+
+
+def parse_usage_text(text: str, now: float) -> dict | None:
+    """Parse the /usage report into {s, sr, w, wr, m?, mw?, mwr?} or None."""
+    out: dict = {}
+    for m in _USAGE_LINE.finditer(text):
+        pct = int(m.group("pct"))
+        reset = _parse_reset_text(m.group("reset") or "", now) if m.group("reset") else -1
+        if m.group("kind") == "session":
+            out["s"], out["sr"] = pct, reset
+        elif (m.group("scope") or "").lower() == "all models":
+            out["w"], out["wr"] = pct, reset
+        else:  # model-scoped weekly window, e.g. "Fable"
+            out["m"], out["mw"], out["mwr"] = m.group("scope")[:LABEL_MAX], pct, reset
+    return out if "s" in out or "w" in out else None
+
+
+def account_label_for(config_dir: Path) -> tuple[str, str]:
+    """(key, label) the way host/statusline-export.js derives them."""
+    label = ""
+    try:
+        raw = (config_dir / ".claude.json").read_text()
+        at = raw.find('"oauthAccount"')
+        if at != -1:
+            seg = raw[at:at + 4096]
+            def field(name: str) -> str:
+                mm = re.search(r'"%s"\s*:\s*("(?:[^"\\]|\\.)*")' % name, seg)
+                try:
+                    return json.loads(mm.group(1)) if mm else ""
+                except ValueError:
+                    return ""
+            email = field("emailAddress")
+            shared = bool(re.search(r"team|enterprise", field("organizationType")))
+            label = (field("organizationName") if shared else "") or email.split("@")[0]
+    except OSError:
+        pass
+    if not label:
+        label = config_dir.name.lstrip(".") or "claude"
+    key = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-") or "claude"
+    return key, label
+
+
+def run_claude_usage(config_dir: Path) -> str | None:
+    """Run `claude -p /usage --output-format json` for one config dir; return the report text."""
+    exe = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
+    env = dict(os.environ, CLAUDE_CONFIG_DIR=str(config_dir))
+    try:
+        r = subprocess.run([exe, "-p", "/usage", "--output-format", "json"],
+                           capture_output=True, text=True, timeout=USAGE_CMD_TIMEOUT,
+                           env=env, cwd=str(Path.home()))
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"/usage failed for {config_dir}: {e}")
+        return None
+    if r.returncode != 0:
+        log(f"/usage rc={r.returncode} for {config_dir}: {r.stderr.strip()[:200]}")
+        return None
+    try:
+        doc = json.loads(r.stdout)
+        text = doc.get("result") if isinstance(doc, dict) else None
+    except ValueError:
+        text = r.stdout
+    return text if isinstance(text, str) and text.strip() else None
+
+
+def _statusline_record(key: str) -> dict | None:
+    try:
+        f = STATE_DIR / f"{key}.json"
+        return json.loads(f.read_text()) if f.exists() else None
+    except (OSError, ValueError):
+        return None
+
+
+def read_usage_payload(now: float | None = None) -> tuple[dict | None, bool]:
+    """Build the BLE payload from `claude -p /usage` per config dir. Returns (payload, no_data)."""
+    if now is None:
+        now = time.time()
+    dirs = read_config_dirs()
+    accounts = []
+    for d in dirs:
+        text = run_claude_usage(d)
+        parsed = parse_usage_text(text, now) if text else None
+        if not parsed:
+            log(f"No usage windows from {d}")
+            continue
+        key, label = account_label_for(d)
+        rec = _statusline_record(key)
+        try:
+            rec_age = now - float(rec.get("updated") or 0) if rec else 1e9
+        except (TypeError, ValueError):
+            rec_age = 1e9
+        if rec and rec_age < 600:  # a fresh hook file: exact epochs beat the parsed clock text
+            five = rec.get("five_hour") or {}
+            seven = rec.get("seven_day") or {}
+            if five.get("resets_at"):
+                parsed["sr"] = _reset_minutes_from_epoch(five.get("resets_at"), now)
+            if seven.get("resets_at"):
+                parsed["wr"] = _reset_minutes_from_epoch(seven.get("resets_at"), now)
+        acct = {"k": label[:LABEL_MAX], "s": parsed.get("s", 0), "sr": parsed.get("sr", -1),
+                "w": parsed.get("w", 0), "wr": parsed.get("wr", -1), "age": 0}
+        if "m" in parsed:
+            acct.update(m=parsed["m"], mw=parsed["mw"], mwr=parsed["mwr"])
+        accounts.append(acct)
+    if not accounts:
+        return None, True
+
+    order = read_accounts_order()
+    def _rank(a: dict) -> tuple[int, str]:
+        k = re.sub(r"[^a-z0-9]+", "-", a["k"].lower()).strip("-")
+        return (order.index(k) if k in order else len(order), k)
+    accounts.sort(key=_rank)
+    # Active = highest session % (the /usage text has no timestamps to compare).
+    active = max(range(len(accounts)), key=lambda i: accounts[i]["s"])
+    a = accounts[active]
+    payload = {
+        "s": a["s"], "sr": a["sr"], "w": a["w"], "wr": a["wr"],
+        "st": "allowed", "acct": "pro", "ok": True,
+        "a": active,
+        "accounts": accounts,
+    }
+    add_chime_field(payload)
+    add_clock_fields(payload)
+    return payload, False
+
+
 async def poll_source() -> tuple[dict | None, bool]:
     """Dispatch on the configured data source. Same contract as poll_active."""
-    if read_source_setting() == "statusline":
+    src = read_source_setting()
+    if src == "statusline":
         return read_statusline_payload()
+    if src == "usage":
+        return await asyncio.to_thread(read_usage_payload)
     return await poll_active()
 
 

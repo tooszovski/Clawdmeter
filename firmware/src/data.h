@@ -21,6 +21,10 @@ struct UsageData {
     // empty / -1.
     char label[16];          // account label shown as the column header
     int  age_s;              // seconds since the host last refreshed this account; -1 = unknown
+    // Optional model-scoped weekly window (e.g. "Fable" on Max plans).
+    char  model_label[12];   // "" = none
+    float model_pct;         // -1 = none
+    int   model_reset_mins;
 };
 
 // Max accounts the wide two-column layout can show side by side.

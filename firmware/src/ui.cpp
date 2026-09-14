@@ -72,7 +72,7 @@ struct Layout {
     // per account, each with its own 5h / 7d rows and a "last updated" line.
     bool    wide;
     int16_t wide_col_w, wide_col_gap;
-    int16_t wide_row1_y, wide_row2_y;   // row tops inside the column panel
+    int16_t wide_row1_y, wide_row2_y, wide_row3_y;   // row tops inside the column panel
     int16_t wide_bar_dy;                // bar top relative to the row top
     int16_t wide_pct_x;                 // percentage label x (right of the pill)
     const lv_font_t* name_font;         // account label
@@ -220,9 +220,12 @@ static void compute_layout(const BoardCaps& c) {
         L.wide_col_w   = (c.width - 2 * L.margin - L.wide_col_gap) / 2;
         L.batt_w = ICON_BATTERY_SMALL_W;
         L.batt_y = L.margin + 8;
-        L.wide_row1_y  = 28;
-        L.wide_row2_y  = 90;
-        L.wide_bar_dy  = 32;
+        // Three rows (5h, 7d, model week): 44 px pitch, bar 10 px under the number.
+        L.bar_h        = 10;
+        L.wide_row1_y  = 26;
+        L.wide_row2_y  = 70;
+        L.wide_row3_y  = 114;
+        L.wide_bar_dy  = 30;
         L.wide_pct_x   = 46;
     }
 
@@ -279,6 +282,10 @@ struct AcctColumn {
     lv_obj_t* lbl_w_pct;
     lv_obj_t* lbl_w_reset;
     lv_obj_t* bar_w;
+    lv_obj_t* pill_m;       // model-scoped weekly row (e.g. "Fable"); hidden when absent
+    lv_obj_t* lbl_m_pct;
+    lv_obj_t* lbl_m_reset;
+    lv_obj_t* bar_m;
     int       age_base_s;   // host-reported age (s) at fetch time; -1 = unknown
     bool      has_data;
 };
@@ -489,7 +496,7 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
 
 // ---- Wide layout builders ----
 
-static void make_wide_row(lv_obj_t* panel, int y, const char* pill_text,
+static lv_obj_t* make_wide_row(lv_obj_t* panel, int y, const char* pill_text,
                           lv_obj_t** out_pct, lv_obj_t** out_reset, lv_obj_t** out_bar) {
     lv_obj_t* pill = make_pill(panel, pill_text);
     lv_obj_set_pos(pill, 0, y + 4);
@@ -510,6 +517,16 @@ static void make_wide_row(lv_obj_t* panel, int y, const char* pill_text,
 
     *out_bar = make_bar(panel, 0, y + L.wide_bar_dy,
                         L.wide_col_w - 2 * L.panel_pad_x, L.bar_h);
+    return pill;
+}
+
+static void set_row_hidden(AcctColumn* c, bool hidden) {
+    lv_obj_t* objs[] = { c->pill_m, c->lbl_m_pct, c->lbl_m_reset, c->bar_m };
+    for (lv_obj_t* o : objs) {
+        if (!o) continue;
+        if (hidden) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+        else        lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static void build_wide_columns(lv_obj_t* parent) {
@@ -536,6 +553,8 @@ static void build_wide_columns(lv_obj_t* parent) {
 
         make_wide_row(c->panel, L.wide_row1_y, "5h", &c->lbl_s_pct, &c->lbl_s_reset, &c->bar_s);
         make_wide_row(c->panel, L.wide_row2_y, "7d", &c->lbl_w_pct, &c->lbl_w_reset, &c->bar_w);
+        c->pill_m = make_wide_row(c->panel, L.wide_row3_y, "Model", &c->lbl_m_pct, &c->lbl_m_reset, &c->bar_m);
+        set_row_hidden(c, true);
         c->age_base_s = -1;
         c->has_data = false;
     }
@@ -875,6 +894,7 @@ void ui_update_accounts(const UsageData* accts, int count) {
             lv_label_set_text(c->lbl_w_reset, "---");
             lv_bar_set_value(c->bar_s, 0, LV_ANIM_OFF);
             lv_bar_set_value(c->bar_w, 0, LV_ANIM_OFF);
+            set_row_hidden(c, true);
             continue;
         }
         const UsageData* d = &accts[i];
@@ -895,6 +915,22 @@ void ui_update_accounts(const UsageData* accts, int count) {
         lv_obj_set_style_bg_color(c->bar_w, pct_color(d->weekly_pct), LV_PART_INDICATOR);
         format_reset_time(d->weekly_reset_mins, buf, sizeof(buf));
         lv_label_set_text(c->lbl_w_reset, buf);
+
+        // Model-scoped weekly window (Fable / Opus / Sonnet), when the host has one.
+        if (d->model_label[0] && d->model_pct >= 0.0f) {
+            int m_pct = (int)(d->model_pct + 0.5f);
+            lv_label_set_text(c->pill_m, d->model_label);
+            lv_obj_update_layout(c->pill_m);
+            lv_obj_set_x(c->lbl_m_pct, lv_obj_get_width(c->pill_m) + 10);
+            lv_label_set_text_fmt(c->lbl_m_pct, "%d%%", m_pct);
+            lv_bar_set_value(c->bar_m, m_pct, LV_ANIM_ON);
+            lv_obj_set_style_bg_color(c->bar_m, pct_color(d->model_pct), LV_PART_INDICATOR);
+            format_reset_time(d->model_reset_mins, buf, sizeof(buf));
+            lv_label_set_text(c->lbl_m_reset, buf);
+            set_row_hidden(c, false);
+        } else {
+            set_row_hidden(c, true);
+        }
     }
     age_last_ms = acct_fetch_ms;
     refresh_ages(acct_fetch_ms);

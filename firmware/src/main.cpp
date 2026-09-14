@@ -151,6 +151,9 @@ static bool parse_json(const char* json, UsageData* out) {
             d->weekly_pct = a["w"] | 0.0f;
             d->weekly_reset_mins = a["wr"] | -1;
             d->age_s = a["age"] | -1;
+            strlcpy(d->model_label, a["m"] | "", sizeof(d->model_label));
+            d->model_pct = a["mw"] | -1.0f;
+            d->model_reset_mins = a["mwr"] | -1;
             strlcpy(d->status, "allowed", sizeof(d->status));
             d->clock_fmt = out->clock_fmt;
             d->ok = true;

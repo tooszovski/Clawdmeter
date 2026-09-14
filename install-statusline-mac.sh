@@ -5,8 +5,12 @@
 # LaunchAgent, and (with --patch-settings) points Claude Code's statusLine
 # command at the export wrapper.
 #
-#   ./install-statusline-mac.sh [--accounts "personal, work"] [--clock off|auto|12|24]
+#   ./install-statusline-mac.sh [--source usage|statusline] [--config-dirs "~/.claude, ~/.claude-work"]
+#                               [--accounts "personal, work"] [--clock off|auto|12|24]
 #                               [--statusline /path/to/statusline.js] [--patch-settings]
+#
+# --source usage (default): the daemon runs `claude -p /usage` in every
+# --config-dirs entry; no hook needed, --patch-settings is optional.
 #
 # Re-running is safe: every step is idempotent. Pairing is unchanged: flash the
 # firmware, then System Settings → Bluetooth → Connect "Clawdmeter".
@@ -26,12 +30,16 @@ STATE_DIR="$HOME/.local/state/clawdmeter"
 SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 
 ACCOUNTS=""
+SOURCE="usage"
+CONFIG_DIRS=""
 CLOCK="24"
 STATUSLINE=""
 PATCH_SETTINGS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --accounts) ACCOUNTS="$2"; shift 2 ;;
+        --source) SOURCE="$2"; shift 2 ;;
+        --config-dirs) CONFIG_DIRS="$2"; shift 2 ;;
         --clock) CLOCK="$2"; shift 2 ;;
         --statusline) STATUSLINE="$2"; shift 2 ;;
         --patch-settings) PATCH_SETTINGS=1; shift ;;
@@ -48,7 +56,9 @@ upsert_config_key() {   # key value — replace or append, keep everything else
     echo "$key = $value" >> "$CONFIG_FILE"
 }
 
-echo "=== Clawdmeter daemon (statusline source) — macOS ==="
+echo "=== Clawdmeter daemon (source = $SOURCE) — macOS ==="
+case "$SOURCE" in usage|statusline) ;; *) echo "--source must be usage or statusline"; exit 1 ;; esac
+[ "$SOURCE" = usage ] && ! command -v claude >/dev/null && [ ! -x "$HOME/.local/bin/claude" ] && { echo "claude CLI not found (needed for --source usage)"; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required"; exit 1; }
 command -v node >/dev/null || { echo "node is required (runs host/statusline-export.js)"; exit 1; }
 
@@ -62,7 +72,8 @@ fi
 
 echo "[2/5] Config: $CONFIG_FILE"
 mkdir -p "$STATE_DIR"
-upsert_config_key source statusline
+upsert_config_key source "$SOURCE"
+[ -n "$CONFIG_DIRS" ] && upsert_config_key config_dirs "$CONFIG_DIRS"
 upsert_config_key clock "$CLOCK"
 [ -n "$ACCOUNTS" ] && upsert_config_key accounts "$ACCOUNTS"
 grep -qE "^[[:space:]]*chime[[:space:]]*=" "$CONFIG_FILE" || upsert_config_key chime off
