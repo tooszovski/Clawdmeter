@@ -20,3 +20,8 @@ bool idle_consume_wake_press(void);
 // sleeves, etc.). Callers use this to silently drop touch events while the
 // panel is dark.
 bool idle_is_asleep(void);
+
+// Manual sleep (double tap): dark panel that only a double tap or a button
+// press ends — the USB-present auto-wake in idle_tick() leaves it alone.
+void idle_toggle_manual_sleep(void);
+bool idle_is_manual_sleep(void);

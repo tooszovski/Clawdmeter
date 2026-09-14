@@ -21,13 +21,25 @@ static const uint8_t READ_CMD[11] = {0xB5, 0xAB, 0xA5, 0x5A, 0x00, 0x00, 0x00, 0
 
 static volatile bool touch_irq = false;
 static bool     pressed_state = false;
+static bool     release_pending = false;
 static uint16_t last_x = 0, last_y = 0;
 static uint32_t last_read_ms = 0;
+static uint32_t press_started_ms = 0;
+static uint32_t last_valid_ms = 0;
+
+// Without a fresh INT the controller answers a poll with a junk frame (seen as
+// 40 0A 10 .. with "10 fingers"), so a naive poll-while-pressed loop releases
+// the touch ~20 ms after the press and LVGL misses every other tap. Contact is
+// therefore held until a valid finger-count-0 frame or RELEASE_TIMEOUT_MS
+// without a valid report, and never shorter than MIN_PRESS_MS so the indev
+// read (33 ms period) always sees the press before the release.
+#define RELEASE_TIMEOUT_MS 150
+#define MIN_PRESS_MS        60
 
 static void IRAM_ATTR touch_isr(void) { touch_irq = true; }
 
 static void map_to_landscape(uint16_t px, uint16_t py, uint16_t* lx, uint16_t* ly) {
-    // Inverse of display.cpp's rotate_strip mapping.
+    // Inverse of display.cpp's rotate mapping.
     if (px >= PANEL_WIDTH)  px = PANEL_WIDTH - 1;
     if (py >= PANEL_HEIGHT) py = PANEL_HEIGHT - 1;
     if (board_rotation_quadrant() == 1) {
@@ -39,29 +51,28 @@ static void map_to_landscape(uint16_t px, uint16_t py, uint16_t* lx, uint16_t* l
     }
 }
 
-static void read_controller(void) {
+// Returns 1 = valid contact report (coords updated), 0 = valid "no finger"
+// report, -1 = bus error or junk frame (caller keeps its state).
+static int read_controller(void) {
     uint8_t buf[8] = {0};
     Wire.beginTransmission(AXS_TOUCH_ADDR);
     Wire.write(READ_CMD, sizeof(READ_CMD));
-    if (Wire.endTransmission(false) != 0) { pressed_state = false; return; }
-    if (Wire.requestFrom((uint8_t)AXS_TOUCH_ADDR, (uint8_t)sizeof(buf)) != sizeof(buf)) {
-        pressed_state = false;
-        return;
-    }
+    if (Wire.endTransmission(false) != 0) return -1;
+    if (Wire.requestFrom((uint8_t)AXS_TOUCH_ADDR, (uint8_t)sizeof(buf)) != sizeof(buf)) return -1;
     for (size_t i = 0; i < sizeof(buf); i++) buf[i] = Wire.read();
 
     const uint8_t fingers = buf[1];
-    const uint8_t event   = buf[2] >> 4;     // 0x08 = contact per LilyGo's example
-    if (fingers == 0 || fingers > 2 || event != 0x08) {
-        pressed_state = false;
-        return;
-    }
+    if (fingers > 2) return -1;            // junk frame
+    if (fingers == 0) return 0;
+    // Event nibble (buf[2] >> 4) is 0x4 on every contact report from this
+    // unit (LilyGo's example expects 0x8) — the finger count is the signal.
     const uint16_t raw_x = ((uint16_t)(buf[4] & 0x0F) << 8) | buf[5];
     const uint16_t raw_y = ((uint16_t)(buf[2] & 0x0F) << 8) | buf[3];
+    if (raw_x >= PANEL_WIDTH || raw_y >= PANEL_HEIGHT) return -1;
     const uint16_t px = raw_x;
-    const uint16_t py = (raw_y < PANEL_HEIGHT) ? (PANEL_HEIGHT - 1 - raw_y) : 0;
+    const uint16_t py = PANEL_HEIGHT - 1 - raw_y;
     map_to_landscape(px, py, &last_x, &last_y);
-    pressed_state = true;
+    return 1;
 }
 
 void touch_hal_init(void) {
@@ -79,13 +90,34 @@ void touch_hal_init(void) {
 
 void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
     const uint32_t now = millis();
-    // Read on interrupt, and re-poll while pressed so a missed release edge
-    // (finger-up report between polls) can't leave a stuck press.
-    if (touch_irq || (pressed_state && now - last_read_ms >= 20)) {
-        touch_irq = false;
+    bool want_read = false;
+    if (touch_irq) { touch_irq = false; want_read = true; }
+    else if (pressed_state && now - last_read_ms >= 20) want_read = true;
+
+    if (want_read) {
         last_read_ms = now;
-        read_controller();
+        int r = read_controller();
+        if (r == 1) {
+            if (!pressed_state) {
+                press_started_ms = now;
+                Serial.printf("touch press logical=(%u,%u)\n", last_x, last_y);
+            }
+            pressed_state = true;
+            release_pending = false;
+            last_valid_ms = now;
+        } else if (r == 0 && pressed_state) {
+            release_pending = true;
+        }
+        // r == -1: junk / bus hiccup — keep the current state.
     }
+
+    if (pressed_state &&
+        (release_pending || now - last_valid_ms >= RELEASE_TIMEOUT_MS) &&
+        now - press_started_ms >= MIN_PRESS_MS) {
+        pressed_state = false;
+        release_pending = false;
+    }
+
     *x = last_x;
     *y = last_y;
     *pressed = pressed_state;

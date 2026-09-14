@@ -977,10 +977,28 @@ static void apply_battery_visibility(void) {
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
+// Tap → toggle, deferred so a second tap (double-tap sleep gesture) can cancel
+// it before the screen flips. Restarted on every tap.
+#define UI_TAP_TOGGLE_DELAY_MS 350
+static lv_timer_t* toggle_timer = nullptr;
+
+static void toggle_timer_cb(lv_timer_t* t) {
+    (void)t;
+    toggle_timer = nullptr;   // repeat_count 1: LVGL deletes it after this call
+    ui_toggle_splash();
+}
+
+void ui_cancel_pending_toggle(void) {
+    if (!toggle_timer) return;
+    lv_timer_delete(toggle_timer);
+    toggle_timer = nullptr;
+}
+
 static void global_click_cb(lv_event_t* e) {
     (void)e;
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
-    else                                  ui_show_screen(SCREEN_SPLASH);
+    if (toggle_timer) { lv_timer_reset(toggle_timer); return; }
+    toggle_timer = lv_timer_create(toggle_timer_cb, UI_TAP_TOGGLE_DELAY_MS, NULL);
+    lv_timer_set_repeat_count(toggle_timer, 1);
 }
 
 void ui_show_screen(screen_t screen) {
