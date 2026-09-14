@@ -215,8 +215,11 @@ static void compute_layout(const BoardCaps& c) {
         L.pair_y3 = 96;
         L.bt_status_font = &font_styrene_28;
         L.bt_device_font = &font_styrene_16;
-        L.wide_col_gap = 12;
+        // Centre gap hosts the battery glyph (24 px) with its percentage below.
+        L.wide_col_gap = 40;
         L.wide_col_w   = (c.width - 2 * L.margin - L.wide_col_gap) / 2;
+        L.batt_w = ICON_BATTERY_SMALL_W;
+        L.batt_y = L.margin + 8;
         L.wide_row1_y  = 28;
         L.wide_row2_y  = 90;
         L.wide_bar_dy  = 32;
@@ -286,6 +289,8 @@ static uint32_t age_last_ms   = 0;      // last "updated N ago" re-render
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
+static lv_obj_t* lbl_batt_pct = nullptr;   // wide layout: "96%" under the glyph
+static bool      batt_present = false;      // last reading had a battery (pct >= 0)
 static lv_obj_t* logo_img;
 static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 
@@ -380,6 +385,7 @@ static void format_reset_time(int mins, char* buf, size_t len) {
 
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
+static void apply_battery_visibility(void);
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* panel = lv_obj_create(parent);
@@ -742,13 +748,26 @@ void ui_init(void) {
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, L.scr_w - L.batt_w - L.margin, L.batt_y);
+    if (L.wide) {
+        // Centre gap between the two account columns: glyph on top, percent below.
+        const int bx = (L.scr_w - L.batt_w) / 2;
+        lv_obj_set_pos(battery_img, bx, L.batt_y);
+        lbl_batt_pct = lv_label_create(scr);
+        lv_label_set_text(lbl_batt_pct, "");
+        lv_obj_set_style_text_font(lbl_batt_pct, &font_styrene_12, 0);
+        lv_obj_set_style_text_color(lbl_batt_pct, COL_DIM, 0);
+        lv_obj_set_style_text_align(lbl_batt_pct, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(lbl_batt_pct, L.wide_col_gap);
+        lv_obj_set_pos(lbl_batt_pct, (L.scr_w - L.wide_col_gap) / 2, L.batt_y + ICON_BATTERY_SMALL_H + 2);
+    } else {
+        lv_obj_set_pos(battery_img, L.scr_w - L.batt_w - L.margin, L.batt_y);
+    }
     // Boards without battery telemetry never show the indicator (per the HAL
-    // contract; previously every board drew the empty-battery glyph). The wide
-    // layout has no header strip to put it in either.
-    if (!board_caps().has_battery || L.wide) {
+    // contract; previously every board drew the empty-battery glyph).
+    if (!board_caps().has_battery) {
         lv_obj_del(battery_img);
         battery_img = nullptr;
+        if (lbl_batt_pct) { lv_obj_del(lbl_batt_pct); lbl_batt_pct = nullptr; }
     }
 }
 
@@ -908,6 +927,7 @@ static void update_view_state(void) {
         if (v == 2) lv_obj_add_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
         else        lv_obj_clear_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
     }
+    apply_battery_visibility();
 }
 
 void ui_tick_anim(void) {
@@ -977,8 +997,17 @@ void ui_tick_anim(void) {
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    // Splash never shows it. The wide layout shows it only on the live stats
+    // columns (not on the pairing hint / idle views) and only when a battery
+    // is actually attached.
+    const bool hide = (current_screen == SCREEN_SPLASH) ||
+                      (L.wide && (view_state != 2 || !batt_present));
+    if (hide) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    else      lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    if (lbl_batt_pct) {
+        if (hide) lv_obj_add_flag(lbl_batt_pct, LV_OBJ_FLAG_HIDDEN);
+        else      lv_obj_clear_flag(lbl_batt_pct, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 // Short tap → toggle splash <-> usage. Long press → manual sleep (dark panel,
@@ -1041,6 +1070,7 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
 
 void ui_update_battery(int percent, bool charging) {
     if (!battery_img) return;
+    batt_present = (percent >= 0) || charging;
     int idx;
     if (charging) {
         idx = 4;
@@ -1056,5 +1086,9 @@ void ui_update_battery(int percent, bool charging) {
         idx = 3;
     }
     lv_image_set_src(battery_img, &battery_dscs[idx]);
+    if (lbl_batt_pct) {
+        if (percent < 0) lv_label_set_text(lbl_batt_pct, "");
+        else             lv_label_set_text_fmt(lbl_batt_pct, "%d%%", percent > 100 ? 100 : percent);
+    }
     apply_battery_visibility();
 }

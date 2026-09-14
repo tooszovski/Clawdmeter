@@ -162,7 +162,9 @@ static bool parse_json(const char* json, UsageData* out) {
 }
 
 // Optional per-board serial debug hook: return true if the command was handled.
-extern "C" bool board_debug_cmd(const char* cmd) __attribute__((weak));
+// Weak default so boards (and the simulator) without one still link; a board
+// folder overrides it with a strong definition.
+extern "C" __attribute__((weak)) bool board_debug_cmd(const char* cmd) { (void)cmd; return false; }
 
 // ---- Serial command buffer ----
 // Sized to take a full `json <payload>` line (QA injection, see handle_payload).
@@ -246,7 +248,7 @@ static void check_serial_cmd() {
             else if (strncmp(cmd_buf, "json ", 5) == 0) {                  // QA: inject a daemon payload
                 Serial.println(handle_payload(cmd_buf + 5) ? "JSON_OK" : "JSON_ERR");
             }
-            else if (board_debug_cmd && board_debug_cmd(cmd_buf)) {}         // board-specific debug
+            else if (board_debug_cmd(cmd_buf)) {}                            // board-specific debug
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
