@@ -2,6 +2,9 @@
 #include "board.h"
 #include <Arduino.h>
 #include <Wire.h>
+#include <lvgl.h>
+#include <stdlib.h>
+#include <string.h>
 
 // Touch is integrated in the AXS15231B and read over I2C (0x3B) with the
 // vendor's 11-byte read command; the reply is 8 bytes:
@@ -33,7 +36,7 @@ static uint32_t last_valid_ms = 0;
 // therefore held until a valid finger-count-0 frame or RELEASE_TIMEOUT_MS
 // without a valid report, and never shorter than MIN_PRESS_MS so the indev
 // read (33 ms period) always sees the press before the release.
-#define RELEASE_TIMEOUT_MS 150
+#define RELEASE_TIMEOUT_MS 120
 #define MIN_PRESS_MS        60
 
 static void IRAM_ATTR touch_isr(void) { touch_irq = true; }
@@ -88,20 +91,67 @@ void touch_hal_init(void) {
     Serial.printf("Touch AXS15231B @0x%02X: %s\n", AXS_TOUCH_ADDR, ok ? "OK" : "no response");
 }
 
+// Serial "tdbg": force a controller read every 100 ms and print the raw
+// frame + INT level regardless of interrupts (diagnostics).
+static bool dbg_poll = false;
+int  display_debug_set_mode(int m);
+void display_debug_log(bool on);
+extern "C" bool board_debug_cmd(const char* cmd) {
+    if (strncmp(cmd, "disp ", 5) == 0) {
+        int m = display_debug_set_mode(atoi(cmd + 5));
+        Serial.printf("display push mode = %d\n", m);
+        return true;
+    }
+    if (strcmp(cmd, "displog") == 0) { static bool on = false; on = !on; display_debug_log(on); Serial.printf("display log %d\n", on); return true; }
+    if (strcmp(cmd, "redraw") == 0) { lv_obj_invalidate(lv_screen_active()); Serial.println("redraw"); return true; }
+    if (strcmp(cmd, "reboot") == 0) { Serial.println("rebooting"); Serial.flush(); delay(50); ESP.restart(); return true; }
+    if (strcmp(cmd, "i2cscan") == 0) {
+        Serial.print("i2c:");
+        for (uint8_t a = 1; a < 127; a++) {
+            Wire.beginTransmission(a);
+            if (Wire.endTransmission() == 0) Serial.printf(" 0x%02X", a);
+        }
+        Serial.println();
+        return true;
+    }
+    if (strcmp(cmd, "tdbg") == 0) {
+        dbg_poll = !dbg_poll;
+        Serial.printf("touch debug poll %s\n", dbg_poll ? "ON" : "OFF");
+        return true;
+    }
+    return false;
+}
+
 void touch_hal_read(uint16_t* x, uint16_t* y, bool* pressed) {
     const uint32_t now = millis();
+    if (dbg_poll) {
+        static uint32_t dbg_poll_ms = 0;
+        if (now - dbg_poll_ms >= 100) {
+            dbg_poll_ms = now;
+            uint8_t buf[8] = {0};
+            Wire.beginTransmission(AXS_TOUCH_ADDR);
+            Wire.write(READ_CMD, sizeof(READ_CMD));
+            int e = Wire.endTransmission(false);
+            int n = (e == 0) ? Wire.requestFrom((uint8_t)AXS_TOUCH_ADDR, (uint8_t)8) : 0;
+            for (int i = 0; i < n && i < 8; i++) buf[i] = Wire.read();
+            Serial.printf("tdbg int=%d i2c=%d n=%d raw %02X %02X %02X %02X %02X %02X %02X %02X irq=%d\n",
+                digitalRead(TP_INT), e, n, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                touch_irq ? 1 : 0);
+        }
+    }
+    // Read ONLY on INT. A blind poll between reports made the controller
+    // stall the I2C bus for seconds (loop frozen, LVGL never saw the release
+    // until the next touch — which is why only double taps ever registered).
+    // The controller keeps reporting while a finger is down, so the release is
+    // "no report for RELEASE_TIMEOUT_MS".
     bool want_read = false;
     if (touch_irq) { touch_irq = false; want_read = true; }
-    else if (pressed_state && now - last_read_ms >= 20) want_read = true;
 
     if (want_read) {
         last_read_ms = now;
         int r = read_controller();
         if (r == 1) {
-            if (!pressed_state) {
-                press_started_ms = now;
-                Serial.printf("touch press logical=(%u,%u)\n", last_x, last_y);
-            }
+            if (!pressed_state) press_started_ms = now;
             pressed_state = true;
             release_pending = false;
             last_valid_ms = now;

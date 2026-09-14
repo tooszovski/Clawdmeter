@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Preferences.h>
+#include <esp_system.h>
 
 // Bring up the shared I2C bus (touch + SY6970 charger) and resolve the panel
 // orientation. Holding BOOT while the board powers on flips the landscape
@@ -12,9 +13,40 @@ static uint8_t rotation = LCD_ROTATION_DEFAULT;
 
 uint8_t board_rotation_quadrant(void) { return rotation; }
 
+static const char* reset_reason_str(esp_reset_reason_t r) {
+    switch (r) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_EXT:       return "external pin";
+    case ESP_RST_SW:        return "software";
+    case ESP_RST_PANIC:     return "PANIC";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "task watchdog";
+    case ESP_RST_WDT:       return "other watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep wake";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT";
+    case ESP_RST_SDIO:      return "sdio";
+    case ESP_RST_USB:       return "usb";
+    case ESP_RST_JTAG:      return "jtag";
+    default:                return "unknown";
+    }
+}
+
 extern "C" void board_init(void) {
+    Serial.printf("Reset reason: %s (%d)\n", reset_reason_str(esp_reset_reason()), (int)esp_reset_reason());
+    // Touch/panel reset (shared GPIO16). LilyGo's reference brings INT up
+    // with a pull-up BEFORE pulsing reset; the AXS15231B samples INT at reset
+    // and comes up dead (constant 0x02 frames, no interrupts) if it floats.
+    pinMode(TP_INT, INPUT_PULLUP);
+    pinMode(LCD_RESET, OUTPUT);
+    digitalWrite(LCD_RESET, HIGH); delay(2);
+    digitalWrite(LCD_RESET, LOW);  delay(100);
+    digitalWrite(LCD_RESET, HIGH); delay(2);
+
     Wire.begin(IIC_SDA, IIC_SCL);
-    Wire.setClock(400000);
+    // 100 kHz, as in LilyGo's reference. At 400 kHz the AXS15231B touch block
+    // answered polls with constant junk bytes and stalled the bus for seconds.
+    Wire.setClock(100000);
+    Wire.setTimeOut(30);   // ms — never let a wedged transaction stall the LVGL loop
 
     Preferences prefs;
     prefs.begin("tdlong", false);
