@@ -63,11 +63,9 @@ static void rounder_cb(lv_event_t* e) {
 //   false → touch never counts as activity and is fully swallowed while the
 //           panel is dark, so pets/sleeves can't wake it overnight and LVGL
 //           can't quietly toggle splash<->usage on a black panel.
-// On top of that, DOUBLE_TAP_SLEEP: two presses within DOUBLE_TAP_MS and
-// DOUBLE_TAP_SLOP_PX toggle a manual sleep (dark panel, touch alive). While
-// manually dark only a double tap (or a button) wakes; single taps are
-// swallowed. The second press of a double tap is swallowed so it never reaches
-// LVGL as a click, and any pending single-tap screen toggle is cancelled.
+// LONG_TAP_SLEEP: while awake, LVGL's LONG_PRESSED (ui.cpp) starts a manual
+// sleep. While manually dark, touches never reach LVGL; a raw hold of
+// LONG_TAP_MS here ends the sleep, and short taps are swallowed.
 static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     (void)indev;
     uint16_t x, y;
@@ -77,36 +75,26 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
 
     static bool     touch_was = false;
     static bool     swallow = false;       // hide the current press from LVGL until release
-    static uint32_t last_tap_ms = 0;
-    static uint16_t last_tap_x = 0, last_tap_y = 0;
+    static uint32_t press_ms = 0;
+    static bool     long_done = false;
 
     if (raw_pressed && !touch_was) {          // press edge
-        const uint32_t now = millis();
-        const bool near = (abs((int)x - (int)last_tap_x) <= DOUBLE_TAP_SLOP_PX) &&
-                          (abs((int)y - (int)last_tap_y) <= DOUBLE_TAP_SLOP_PX);
-        const bool dbl = DOUBLE_TAP_SLEEP && last_tap_ms &&
-                         (now - last_tap_ms) <= DOUBLE_TAP_MS && near;
-        if (dbl) {
-            last_tap_ms = 0;
+        press_ms = millis();
+        long_done = false;
+        if (idle_is_manual_sleep()) {
+            swallow = true;                       // only a long hold ends a manual sleep
+        } else if (IDLE_WAKE_ON_TOUCH) {
+            if (idle_consume_wake_press()) swallow = true;   // woke from idle sleep: consume the tap
+        } else if (idle_is_asleep()) {
             swallow = true;
-            ui_cancel_pending_toggle();
-            idle_toggle_manual_sleep();
-        } else {
-            last_tap_ms = now;
-            last_tap_x = x;
-            last_tap_y = y;
-            if (idle_is_manual_sleep()) {
-                swallow = true;                       // single taps don't end a manual sleep
-            } else if (IDLE_WAKE_ON_TOUCH) {
-                if (idle_consume_wake_press()) {      // woke from idle sleep: consume the tap
-                    swallow = true;
-                    last_tap_ms = 0;                  // don't pair a wake tap into a double tap
-                }
-            } else if (idle_is_asleep()) {
-                swallow = true;
-            }
         }
-    } else if (!raw_pressed && touch_was) {   // release edge
+    } else if (raw_pressed && touch_was) {     // held
+        if (LONG_TAP_SLEEP && swallow && !long_done && idle_is_manual_sleep() &&
+            millis() - press_ms >= LONG_TAP_MS) {
+            long_done = true;
+            idle_toggle_manual_sleep();           // wake; the finger stays swallowed until release
+        }
+    } else if (!raw_pressed && touch_was) {    // release edge
         if (swallow) { swallow = false; pressed = false; }
     }
     if (swallow) pressed = false;
@@ -305,6 +293,7 @@ void setup() {
     lv_indev_t* indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, my_touch_cb);
+    lv_indev_set_long_press_time(indev, LONG_TAP_MS);   // long tap = manual sleep gesture (ui.cpp)
 
     ble_init();
     input_hal_init();

@@ -6,6 +6,8 @@
 #include "clawd_still.h"
 #include "icons.h"
 #include "hal/board_caps.h"
+#include "idle.h"
+#include "idle_cfg.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -628,7 +630,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_width(usage_container, 0, 0);
     lv_obj_set_style_pad_all(usage_container, 0, 0);
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_LONG_PRESSED, NULL);
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
@@ -716,7 +719,8 @@ void ui_init(void) {
     splash_init(scr);
 
     if (splash_get_root()) {
-        lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_SHORT_CLICKED, NULL);
+        lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_LONG_PRESSED, NULL);
     }
 
     // Corner mascot in the old logo slot. The still Clawd is shorter than the
@@ -977,28 +981,18 @@ static void apply_battery_visibility(void) {
     else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
 }
 
-// Tap → toggle, deferred so a second tap (double-tap sleep gesture) can cancel
-// it before the screen flips. Restarted on every tap.
-#define UI_TAP_TOGGLE_DELAY_MS 350
-static lv_timer_t* toggle_timer = nullptr;
-
-static void toggle_timer_cb(lv_timer_t* t) {
-    (void)t;
-    toggle_timer = nullptr;   // repeat_count 1: LVGL deletes it after this call
-    ui_toggle_splash();
-}
-
-void ui_cancel_pending_toggle(void) {
-    if (!toggle_timer) return;
-    lv_timer_delete(toggle_timer);
-    toggle_timer = nullptr;
-}
-
+// Short tap → toggle splash <-> usage. Long press → manual sleep (dark panel,
+// touch alive; see idle_toggle_manual_sleep). LVGL sends SHORT_CLICKED only
+// when no long press fired during that touch, so a long press never also
+// flips the screen on release.
 static void global_click_cb(lv_event_t* e) {
-    (void)e;
-    if (toggle_timer) { lv_timer_reset(toggle_timer); return; }
-    toggle_timer = lv_timer_create(toggle_timer_cb, UI_TAP_TOGGLE_DELAY_MS, NULL);
-    lv_timer_set_repeat_count(toggle_timer, 1);
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_SHORT_CLICKED) {
+        if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
+        else                                  ui_show_screen(SCREEN_SPLASH);
+    } else if (code == LV_EVENT_LONG_PRESSED && LONG_TAP_SLEEP) {
+        idle_toggle_manual_sleep();
+    }
 }
 
 void ui_show_screen(screen_t screen) {

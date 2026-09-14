@@ -19,9 +19,6 @@ void ui_show_screen(screen_t screen);
 // usage columns on the wide desk-meter layout (tap still flips to the splash).
 screen_t ui_default_screen(void);
 void ui_toggle_splash(void);
-// A tap toggles splash <-> usage after a short delay so a double tap (sleep
-// gesture) can cancel it; main.cpp calls this when it detects the double tap.
-void ui_cancel_pending_toggle(void);
 screen_t ui_get_current_screen(void);
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac);
 void ui_update_battery(int percent, bool charging);

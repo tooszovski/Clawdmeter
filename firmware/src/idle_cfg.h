@@ -22,9 +22,8 @@
 // overnight would be a problem.
 #define IDLE_WAKE_ON_TOUCH          true
 
-// Double tap on the panel darkens it (manual sleep) while touch stays live;
-// another double tap brings it back. Single taps are ignored while manually
+// Long press on the panel darkens it (manual sleep) while touch stays live;
+// another long press brings it back. Short taps are ignored while manually
 // dark, and USB power does not auto-wake a manual sleep (unlike idle sleep).
-#define DOUBLE_TAP_SLEEP            1
-#define DOUBLE_TAP_MS               400    // max gap between the two presses
-#define DOUBLE_TAP_SLOP_PX          60     // max distance between the two presses
+#define LONG_TAP_SLEEP              1
+#define LONG_TAP_MS                 600    // hold time for the gesture

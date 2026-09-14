@@ -18,7 +18,7 @@ static uint32_t fade_last_step_ms = 0;
 static uint8_t  fade_from = DISPLAY_DEFAULT_BRIGHTNESS;
 static uint8_t  fade_to   = 0;
 static uint8_t  awake_brightness = DISPLAY_DEFAULT_BRIGHTNESS;  // user-set "full" level (brightness.cpp)
-static bool     manual_sleep = false;   // dark by double tap, not by timeout
+static bool     manual_sleep = false;   // dark by long tap, not by timeout
 
 static void apply_brightness(uint8_t b) {
     display_hal_set_brightness(b);
