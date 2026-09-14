@@ -1009,6 +1009,10 @@ void ui_toggle_splash(void) {
     else                                  ui_show_screen(SCREEN_SPLASH);
 }
 
+screen_t ui_default_screen(void) {
+    return L.wide ? SCREEN_USAGE : SCREEN_SPLASH;
+}
+
 screen_t ui_get_current_screen(void) {
     return current_screen;
 }
