@@ -47,6 +47,23 @@ Boards supported out of the box:
 - Windows: `python3` 3.11+ (the installer sets up a venv with `bleak`, `httpx`, and `pystray`)
 - Claude Code with an active subscription
 
+## Statusline source (no API calls)
+
+Instead of polling the Anthropic API with your OAuth token, the daemon can read
+the `rate_limits` block Claude Code already hands to its `statusLine` command.
+`host/statusline-export.js` wraps your status-line script, snapshots that block
+to `~/.local/state/clawdmeter/<account>.json`, and the daemon forwards the
+files over BLE (`source = statusline` in the config). Two Claude Code installs
+selected with `CLAUDE_CONFIG_DIR` give two files, shown side by side on wide
+displays with an "updated N ago" freshness line. Details and the payload
+format: [`docs/statusline-source.md`](docs/statusline-source.md).
+
+macOS one-shot setup (venv, config, LaunchAgent, optional `settings.json` patch):
+
+```bash
+./install-statusline-mac.sh --accounts "personal, work" --patch-settings
+```
+
 ## macOS installation
 
 The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were ported by [Chris Davidson (@lorddavidson)](https://github.com/lorddavidson). Thanks Chris!

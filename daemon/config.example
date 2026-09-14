@@ -6,6 +6,22 @@
 #
 # The daemon re-reads it on every poll, so edits take effect within ~60s — no restart needed.
 
+# Where the usage numbers come from.
+#   api        = poll api.anthropic.com with the Claude Code OAuth token (default,
+#                the original behaviour; see README "How it works")
+#   statusline = never call the API: read the files that Claude Code's own
+#                statusLine hook writes through host/statusline-export.js
+#                (~/.local/state/clawdmeter/<account>.json). Every account file
+#                becomes a column on wide displays; the legacy single-account
+#                fields mirror the account refreshed most recently.
+#                Setup: docs/statusline-source.md (macOS: ./install-statusline-mac.sh)
+source = api
+
+# statusline source only: column order on wide displays. Account keys are the
+# file names in ~/.local/state/clawdmeter (organization name for team plans,
+# e-mail local part otherwise, lower-cased). Unlisted accounts follow, sorted.
+# accounts = personal, work
+
 # Poll more than one Claude config dir and show whichever plan is currently
 # active. Use this if you run separate plans from different config dirs (e.g. a
 # personal plan in ~/.claude and a work plan in ~/.claude-work, selected via

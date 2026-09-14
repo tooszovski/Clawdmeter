@@ -19,6 +19,10 @@ files and forwards them over BLE — nothing here talks to the API.
 
 ## Setup
 
+macOS shortcut for all of the below: `./install-statusline-mac.sh --accounts "personal, work" --patch-settings`
+(venv + config + LaunchAgent; `--patch-settings` rewrites `statusLine` in `~/.claude/settings.json`
+with a `.bak-clawdmeter` backup). Manual steps:
+
 1. Point Claude Code at the wrapper (`~/.claude/settings.json`):
 
    ```json
