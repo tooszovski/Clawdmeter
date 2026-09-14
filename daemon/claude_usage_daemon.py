@@ -864,13 +864,19 @@ def read_usage_payload(now: float | None = None) -> tuple[dict | None, bool]:
             rec_age = now - float(rec.get("updated") or 0) if rec else 1e9
         except (TypeError, ValueError):
             rec_age = 1e9
-        if rec and rec_age < 600:  # a fresh hook file: exact epochs beat the parsed clock text
+        if rec and rec_age < 600:
+            # A fresh hook file carries exact epochs; prefer them over the parsed
+            # clock text — but only when they agree with it (within 30 min), so
+            # a file written for another account or window can't leak in.
             five = rec.get("five_hour") or {}
             seven = rec.get("seven_day") or {}
-            if five.get("resets_at"):
-                parsed["sr"] = _reset_minutes_from_epoch(five.get("resets_at"), now)
-            if seven.get("resets_at"):
-                parsed["wr"] = _reset_minutes_from_epoch(seven.get("resets_at"), now)
+            for k, bucket in (("sr", five), ("wr", seven)):
+                if not bucket.get("resets_at"):
+                    continue
+                exact = _reset_minutes_from_epoch(bucket.get("resets_at"), now)
+                txt = parsed.get(k, -1)
+                if exact >= 0 and (txt < 0 or abs(exact - txt) <= 30):
+                    parsed[k] = exact
         acct = {"k": label[:LABEL_MAX], "s": parsed.get("s", 0), "sr": parsed.get("sr", -1),
                 "w": parsed.get("w", 0), "wr": parsed.get("wr", -1), "age": 0}
         if "m" in parsed:
