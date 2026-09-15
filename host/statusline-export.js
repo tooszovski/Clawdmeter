@@ -24,35 +24,12 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn } = require('child_process');
+const { accountInfo, stateDir } = require('./account');
 
 const HOME = os.homedir();
 const STATUSLINE = process.env.CLAWDMETER_STATUSLINE ||
   path.join(HOME, 'git', 'claude-code-statusline', 'statusline.js');
-const STATE_DIR = process.env.CLAWDMETER_STATE_DIR ||
-  path.join(HOME, '.local', 'state', 'clawdmeter');
-
-function accountInfo() {
-  const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
-  let label = '';
-  try {
-    const raw = fs.readFileSync(path.join(claudeDir, '.claude.json'), 'utf8');
-    const at = raw.indexOf('"oauthAccount"');
-    if (at !== -1) {
-      const slice = raw.slice(at, at + 4096);
-      const field = (name) => {
-        const m = slice.match(new RegExp(`"${name}"\\s*:\\s*("(?:[^"\\\\]|\\\\.)*")`));
-        try { return m ? JSON.parse(m[1]) : ''; } catch (e) { return ''; }
-      };
-      const email = field('emailAddress');
-      const orgType = field('organizationType');
-      const shared = /team|enterprise/.test(orgType);
-      label = (shared && field('organizationName')) || email.split('@')[0] || '';
-    }
-  } catch (e) {}
-  if (!label) label = path.basename(claudeDir).replace(/^\./, '') || 'claude';
-  const key = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'claude';
-  return { key, label, claudeDir };
-}
+const STATE_DIR = stateDir();
 
 function bucket(b) {
   if (!b || typeof b !== 'object') return null;

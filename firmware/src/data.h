@@ -25,6 +25,8 @@ struct UsageData {
     char  model_label[12];   // "" = none
     float model_pct;         // -1 = none
     int   model_reset_mins;
+    // Agent working/idle flag from the host's Claude Code hooks ("ag").
+    int   agent;             // 1 = working, 0 = idle (waiting for you), -1 = unknown
 };
 
 // Max accounts the wide two-column layout can show side by side.

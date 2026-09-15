@@ -75,6 +75,7 @@ struct Layout {
     int16_t wide_row1_y, wide_row2_y, wide_row3_y;   // row tops inside the column panel
     int16_t wide_bar_dy;                // bar top relative to the row top
     int16_t wide_pct_x;                 // percentage label x (right of the pill)
+    int16_t wide_dot_y, wide_dot_d;     // agent working/idle dots under the battery
     const lv_font_t* name_font;         // account label
     const lv_font_t* age_font;          // "updated 3m ago"
 };
@@ -227,6 +228,10 @@ static void compute_layout(const BoardCaps& c) {
         L.wide_row3_y  = 114;
         L.wide_bar_dy  = 30;
         L.wide_pct_x   = 46;
+        // Agent dots: below the battery glyph (24 px) and its 12 px percent
+        // label, one per column, each hugging its own column's edge.
+        L.wide_dot_d   = 10;
+        L.wide_dot_y   = L.batt_y + ICON_BATTERY_SMALL_H + 2 + 14 + 10;
     }
 
     L.content_w = L.scr_w - 2 * L.margin;
@@ -241,6 +246,7 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_ACCENT    THEME_ACCENT
 #define COL_GREEN     THEME_GREEN
 #define COL_AMBER     THEME_AMBER
+#define COL_YELLOW    THEME_YELLOW
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
 
@@ -286,6 +292,7 @@ struct AcctColumn {
     lv_obj_t* lbl_m_pct;
     lv_obj_t* lbl_m_reset;
     lv_obj_t* bar_m;
+    lv_obj_t* dot;          // agent state: yellow = working, green = idle, hidden = unknown
     int       age_base_s;   // host-reported age (s) at fetch time; -1 = unknown
     bool      has_data;
 };
@@ -555,9 +562,30 @@ static void build_wide_columns(lv_obj_t* parent) {
         make_wide_row(c->panel, L.wide_row2_y, "7d", &c->lbl_w_pct, &c->lbl_w_reset, &c->bar_w);
         c->pill_m = make_wide_row(c->panel, L.wide_row3_y, "Model", &c->lbl_m_pct, &c->lbl_m_reset, &c->bar_m);
         set_row_hidden(c, true);
+
+        // Working/idle dot in the centre gap, on the column's side of the battery.
+        const int gap_x = L.margin + L.wide_col_w;
+        const int dot_x = (i == 0) ? gap_x + 6
+                                   : gap_x + L.wide_col_gap - 6 - L.wide_dot_d;
+        c->dot = lv_obj_create(parent);
+        lv_obj_remove_style_all(c->dot);
+        lv_obj_set_size(c->dot, L.wide_dot_d, L.wide_dot_d);
+        lv_obj_set_pos(c->dot, dot_x, L.wide_dot_y);
+        lv_obj_set_style_radius(c->dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(c->dot, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(c->dot, COL_GREEN, 0);
+        lv_obj_add_flag(c->dot, LV_OBJ_FLAG_HIDDEN);
+
         c->age_base_s = -1;
         c->has_data = false;
     }
+}
+
+static void set_agent_dot(AcctColumn* c, int agent) {
+    if (!c->dot) return;
+    if (agent < 0) { lv_obj_add_flag(c->dot, LV_OBJ_FLAG_HIDDEN); return; }
+    lv_obj_set_style_bg_color(c->dot, agent ? COL_YELLOW : COL_GREEN, 0);
+    lv_obj_clear_flag(c->dot, LV_OBJ_FLAG_HIDDEN);
 }
 
 // "updated N ago" — the freshness line. Age keeps counting locally between
@@ -895,10 +923,12 @@ void ui_update_accounts(const UsageData* accts, int count) {
             lv_bar_set_value(c->bar_s, 0, LV_ANIM_OFF);
             lv_bar_set_value(c->bar_w, 0, LV_ANIM_OFF);
             set_row_hidden(c, true);
+            set_agent_dot(c, -1);
             continue;
         }
         const UsageData* d = &accts[i];
         c->has_data = true;
+        set_agent_dot(c, d->agent);
         c->age_base_s = d->age_s;
         lv_label_set_text(c->lbl_name, d->label[0] ? d->label : "Account");
 

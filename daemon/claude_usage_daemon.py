@@ -8,6 +8,7 @@ bleak (CoreBluetooth backend on macOS).
 
 import asyncio
 import calendar
+import copy
 import datetime
 import getpass
 import json
@@ -591,6 +592,97 @@ async def poll_active_payload(selector: PlanSelector = _SELECTOR) -> dict | None
     return payload
 
 
+# --- agent working/idle flag ------------------------------------------------
+#
+# host/agent-status.js runs as a Claude Code hook and writes
+# STATE_DIR/agents/<account>/<session_id>.json = {"state": "working"|"idle",
+# "ts": epoch} on prompt/tool/stop events. Folded into the payload as "ag" per
+# account (1 = working, 0 = idle, absent = no session known) so the wide
+# layout can draw a dot under the battery. A "working" record older than
+# AGENT_WORKING_TTL is treated as idle (a killed Claude Code never sends Stop;
+# tool hooks refresh the stamp far more often than that), and records older
+# than AGENT_PRUNE_AGE are deleted.
+
+AGENT_DIR_NAME = "agents"
+AGENT_WORKING_TTL = 15 * 60
+AGENT_PRUNE_AGE = 24 * 3600
+
+
+def read_agent_states(now: float | None = None) -> dict[str, bool]:
+    """account key -> True (working) / False (idle); keys without records are absent."""
+    if now is None:
+        now = time.time()
+    root = STATE_DIR / AGENT_DIR_NAME
+    states: dict[str, bool] = {}
+    try:
+        acct_dirs = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError:
+        return states
+    for d in acct_dirs:
+        working: bool | None = None
+        for f in d.glob("*.json"):
+            try:
+                rec = json.loads(f.read_text())
+                ts = float(rec.get("ts") or 0)
+                state = str(rec.get("state") or "")
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+            age = now - ts
+            if age > AGENT_PRUNE_AGE:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+                continue
+            working = bool(working) or (state == "working" and age <= AGENT_WORKING_TTL)
+        if working is not None:
+            states[d.name.lower()] = working
+    return states
+
+
+def _apply_agent_flag(acct: dict, key: str, states: dict[str, bool]) -> None:
+    if key in states:
+        acct["ag"] = int(states[key])
+    else:
+        acct.pop("ag", None)
+
+
+class Payload(dict):
+    """The dict sent over BLE plus the account keys behind `accounts[]` (in the
+    same order), kept off the wire so a status-only resend can re-join flags."""
+    account_keys: list[str] = []
+
+
+def payload_account_keys(payload: dict) -> list[str]:
+    return list(getattr(payload, "account_keys", []))
+
+
+class CachedPayload:
+    """Last payload written to the device. Between polls the loop asks it to
+    re-emit the same numbers with fresh "ag" flags (and honestly aged "age")
+    whenever an agent flips between working and idle."""
+
+    def __init__(self, payload: dict, keys: list[str], built_at: float) -> None:
+        self.payload = payload
+        self.keys = keys
+        self.built_at = built_at
+
+    def refresh_agent_flags(self, states: dict[str, bool], now: float) -> dict | None:
+        changed = False
+        for key, acct in zip(self.keys, self.payload.get("accounts", [])):
+            old = acct.get("ag")
+            _apply_agent_flag(acct, key, states)
+            changed = changed or acct.get("ag") != old
+        if not changed:
+            return None
+        out = copy.deepcopy(dict(self.payload))
+        elapsed = int(now - self.built_at)
+        for acct in out.get("accounts", []):
+            if isinstance(acct.get("age"), int) and acct["age"] >= 0:
+                acct["age"] += elapsed
+        return out
+
+
 # --- statusline source -------------------------------------------------------
 #
 # Alternative data source that never touches the Anthropic API: Claude Code's
@@ -682,6 +774,7 @@ def read_statusline_payload(now: float | None = None) -> tuple[dict | None, bool
     order = read_accounts_order()
     keys = [k for k in order if k in records] + sorted(k for k in records if k not in order)
 
+    agent_states = read_agent_states(now)
     accounts = []
     for k in keys:
         rec = records[k]
@@ -701,6 +794,7 @@ def read_statusline_payload(now: float | None = None) -> tuple[dict | None, bool
             "wr": _reset_minutes_from_epoch(seven.get("resets_at"), now),
             "age": age,
         })
+        _apply_agent_flag(accounts[-1], k, agent_states)
 
     # Active = the account whose file was written most recently (the Claude
     # Code you are actually typing into refreshes its status line).
@@ -711,12 +805,13 @@ def read_statusline_payload(now: float | None = None) -> tuple[dict | None, bool
             return 0.0
     active = max(range(len(accounts)), key=_upd)
     a = accounts[active]
-    payload = {
+    payload = Payload({
         "s": a["s"], "sr": a["sr"], "w": a["w"], "wr": a["wr"],
         "st": "allowed", "acct": "pro", "ok": True,
         "a": active,
         "accounts": accounts,
-    }
+    })
+    payload.account_keys = keys
     add_chime_field(payload)
     add_clock_fields(payload)
     return payload, False
@@ -851,7 +946,9 @@ def read_usage_payload(now: float | None = None) -> tuple[dict | None, bool]:
     if now is None:
         now = time.time()
     dirs = read_config_dirs()
+    agent_states = read_agent_states(now)
     accounts = []
+    keys: list[str] = []
     for d in dirs:
         text = run_claude_usage(d)
         parsed = parse_usage_text(text, now) if text else None
@@ -881,24 +978,29 @@ def read_usage_payload(now: float | None = None) -> tuple[dict | None, bool]:
                 "w": parsed.get("w", 0), "wr": parsed.get("wr", -1), "age": 0}
         if "m" in parsed:
             acct.update(m=parsed["m"], mw=parsed["mw"], mwr=parsed["mwr"])
+        _apply_agent_flag(acct, key, agent_states)
         accounts.append(acct)
+        keys.append(key)
     if not accounts:
         return None, True
 
     order = read_accounts_order()
-    def _rank(a: dict) -> tuple[int, str]:
-        k = re.sub(r"[^a-z0-9]+", "-", a["k"].lower()).strip("-")
+    def _rank(i: int) -> tuple[int, str]:
+        k = keys[i]
         return (order.index(k) if k in order else len(order), k)
-    accounts.sort(key=_rank)
+    idx = sorted(range(len(accounts)), key=_rank)
+    accounts = [accounts[i] for i in idx]
+    keys = [keys[i] for i in idx]
     # Active = highest session % (the /usage text has no timestamps to compare).
     active = max(range(len(accounts)), key=lambda i: accounts[i]["s"])
     a = accounts[active]
-    payload = {
+    payload = Payload({
         "s": a["s"], "sr": a["sr"], "w": a["w"], "wr": a["wr"],
         "st": "allowed", "acct": "pro", "ok": True,
         "a": active,
         "accounts": accounts,
-    }
+    })
+    payload.account_keys = keys
     add_chime_field(payload)
     add_clock_fields(payload)
     return payload, False
@@ -1076,10 +1178,21 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
 
     last_poll = 0.0
     used_successfully = False
+    cache: CachedPayload | None = None
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
             elapsed = now - last_poll
+            if cache is not None and elapsed < POLL_INTERVAL:
+                # Between polls: only the agent working/idle dots may change.
+                # Re-send the cached numbers with fresh flags so the display
+                # follows the hook within one TICK instead of one POLL_INTERVAL.
+                resend = cache.refresh_agent_flags(read_agent_states(now), now)
+                if resend is not None:
+                    add_clock_fields(resend)
+                    log("Agent state changed: " + ", ".join(
+                        f"{a.get('k')}={a.get('ag', '-')}" for a in resend.get("accounts", [])))
+                    await session.write_payload(resend)
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
                 # Pure free-ride: read whatever access token(s) Claude Code
@@ -1094,6 +1207,7 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     if await session.write_payload(payload):
                         last_poll = time.time()
                         used_successfully = True
+                        cache = CachedPayload(payload, payload_account_keys(payload), last_poll)
                 elif dead:
                     # No live token in any config dir (missing, or a 401/expired
                     # token) -> show "No data" now instead of stale numbers. Guard
@@ -1105,6 +1219,7 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                         "so the statusline hook writes usage files (statusline)")
                     if await session.write_payload({"ok": False}):
                         last_poll = time.time()
+                        cache = None
                 else:
                     # Transient poll failure (a live token that didn't answer this
                     # cycle) -> stay silent and retry next tick.

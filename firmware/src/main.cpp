@@ -154,6 +154,7 @@ static bool parse_json(const char* json, UsageData* out) {
             strlcpy(d->model_label, a["m"] | "", sizeof(d->model_label));
             d->model_pct = a["mw"] | -1.0f;
             d->model_reset_mins = a["mwr"] | -1;
+            d->agent = a["ag"] | -1;
             strlcpy(d->status, "allowed", sizeof(d->status));
             d->clock_fmt = out->clock_fmt;
             d->ok = true;

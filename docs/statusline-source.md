@@ -98,6 +98,39 @@ therefore produce two files, and the payload carries both:
   as "updated N ago" and keep counting between payloads: a column whose
   Claude Code session is closed simply ages instead of looking live.
 
+## Agent working/idle dot (`ag`)
+
+`host/agent-status.js` runs as a Claude Code **hook** (not the status line) and
+records what each session is doing:
+
+| Hook events | Record |
+|---|---|
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `working` |
+| `Stop`, `StopFailure`, `Notification`, `PermissionRequest` | `idle` (waiting for you) |
+| `SessionEnd` | record removed |
+
+One file per session: `~/.local/state/clawdmeter/agents/<account>/<session_id>.json`
+= `{"state": "working", "ts": 1789350175}`. The account key is derived exactly
+like the exporter's (`host/account.js`), so the daemon can join it to the
+column. The daemon folds the records into `"ag"` per account — `1` if **any**
+session of that account is working, `0` if all are idle, absent when no
+session is known — and the wide layout draws a **yellow** (working) / **green**
+(idle) dot under the battery, on the column's side of the gap; no dot when
+unknown.
+
+- A `working` record older than 15 min counts as idle (`AGENT_WORKING_TTL`): a
+  Claude Code that died without `SessionEnd` cannot stay yellow forever, and
+  tool hooks refresh the stamp far more often than that. Records older than
+  24 h are deleted.
+- The daemon re-checks the records every tick (5 s) and, when a flag flips,
+  re-sends the **cached** last payload with the new flags and honestly
+  advanced `age` — no extra `claude -p /usage` run, so the dot follows the
+  hook within ~5 s instead of waiting for the 60 s poll.
+- `install-statusline-mac.sh --patch-settings` registers the hook; by hand,
+  add `node "/path/to/Clawdmeter/host/agent-status.js"` (`"async": true`) to
+  the eight events above in `settings.json`. Sessions already open pick up the
+  new hook only after a restart.
+
 ## Limits
 
 - A column only refreshes while a Claude Code session for that account is open

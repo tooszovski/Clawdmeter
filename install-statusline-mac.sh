@@ -23,6 +23,7 @@ PLIST_DST="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
 VENV_DIR="$SCRIPT_DIR/daemon/.venv"
 DAEMON_PY="$SCRIPT_DIR/daemon/claude_usage_daemon.py"
 EXPORT_JS="$SCRIPT_DIR/host/statusline-export.js"
+AGENT_JS="$(cd "$(dirname "$0")" && pwd)/host/agent-status.js"
 LOG_DIR="$HOME/Library/Logs"
 CONFIG_DIR="$HOME/.config/claude-usage-monitor"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -96,7 +97,7 @@ echo "[4/5] Claude Code statusLine → $EXPORT_JS"
 SNIPPET="\"statusLine\": {\"type\": \"command\", \"command\": \"node \\\"$EXPORT_JS\\\"\", \"refreshInterval\": 60}"
 if [ "$PATCH_SETTINGS" = 1 ] && [ -f "$SETTINGS" ]; then
     cp "$SETTINGS" "$SETTINGS.bak-clawdmeter"
-    STATUSLINE="$STATUSLINE" EXPORT_JS="$EXPORT_JS" SETTINGS="$SETTINGS" python3 - <<'PY'
+    STATUSLINE="$STATUSLINE" EXPORT_JS="$EXPORT_JS" AGENT_JS="$AGENT_JS" SETTINGS="$SETTINGS" python3 - <<'PY'
 import json, os
 p = os.environ["SETTINGS"]; d = json.load(open(p))
 cur = d.get("statusLine", {})
@@ -106,12 +107,23 @@ if cmd and "statusline-export.js" not in cmd and not os.environ.get("STATUSLINE"
     print("      previous statusLine command:", cmd)
     print("      set CLAWDMETER_STATUSLINE to that script if it is not ~/git/claude-code-statusline/statusline.js")
 d["statusLine"] = {"type": "command", "command": f'node "{os.environ["EXPORT_JS"]}"', "refreshInterval": 60}
+# Agent working/idle hook (host/agent-status.js) -> yellow/green dot per column.
+hook_cmd = f'node "{os.environ["AGENT_JS"]}"'
+hooks = d.setdefault("hooks", {})
+for ev in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "StopFailure",
+           "Notification", "PermissionRequest", "SessionEnd"):
+    groups = hooks.setdefault(ev, [])
+    if not any(h.get("command") == hook_cmd for g in groups for h in g.get("hooks", [])):
+        groups.append({"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5, "async": True}]})
 json.dump(d, open(p, "w"), indent=2, ensure_ascii=False); open(p, "a").write("\n")
-print("      patched", p, "(backup: .bak-clawdmeter)")
+print("      patched", p, "(backup: .bak-clawdmeter) — statusLine + agent-status hooks")
 PY
 else
     echo "      add to $SETTINGS:"
     echo "        $SNIPPET"
+    echo "      and, for the working/idle dot, a hook on UserPromptSubmit, PreToolUse, PostToolUse, Stop,"
+    echo "      StopFailure, Notification, PermissionRequest, SessionEnd:"
+    echo "        {\"type\": \"command\", \"command\": \"node \\\"$AGENT_JS\\\"\", \"timeout\": 5, \"async\": true}"
 fi
 if [ -n "$STATUSLINE" ]; then
     echo "      wrapper chains to: $STATUSLINE  (export CLAWDMETER_STATUSLINE=$STATUSLINE in the shell that starts claude,"

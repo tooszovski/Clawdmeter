@@ -10,5 +10,6 @@
 #define THEME_ACCENT   lv_color_hex(0xd97757)   // brand terra-cotta
 #define THEME_GREEN    lv_color_hex(0x788c5d)
 #define THEME_AMBER    lv_color_hex(0xd97757)
+#define THEME_YELLOW   lv_color_hex(0xe6b450)   // agent "working" dot
 #define THEME_RED      lv_color_hex(0xc0392b)
 #define THEME_BAR_BG   lv_color_hex(0x2a2a28)   // unfilled bar track
