@@ -87,6 +87,7 @@ static void refresh_title(void) {
 
 void ble_init(void) {
     load_scenario();
+    if (getenv("SIM_DISCONNECTED")) connected = false;   // boot into the pairing view (headless shots)
     pending = true;
     refresh_title();
 }

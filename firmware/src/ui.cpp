@@ -57,6 +57,10 @@ struct Layout {
 
     // Pairing hint / idle screen
     int16_t pair_y1, pair_y2, pair_y3;
+    // On-screen "Reset pairing" button for boards with no usable PWR button
+    // (pair_btn_h == 0 → no button, the hold-to-pair hint stands alone).
+    int16_t pair_btn_y, pair_btn_w, pair_btn_h;
+    const lv_font_t* pair_btn_font;
     int16_t idle_px;                 // sleeping-creature size on the idle screen
 
     // Bluetooth screen
@@ -211,11 +215,15 @@ static void compute_layout(const BoardCaps& c) {
         L.anim_y = -4;
         L.small_icons = true;
         L.idle_px = 96;
-        L.pair_y1 = 14;
-        L.pair_y2 = 66;
-        L.pair_y3 = 96;
+        L.pair_y1 = 8;
+        L.pair_y2 = 108;
+        L.pair_y3 = 128;
+        L.pair_btn_y = 50;
+        L.pair_btn_w = 300;
+        L.pair_btn_h = 48;
+        L.pair_btn_font  = &font_styrene_20;
         L.bt_status_font = &font_styrene_28;
-        L.bt_device_font = &font_styrene_16;
+        L.bt_device_font = &font_styrene_14;
         // Centre gap hosts the battery glyph (24 px) with its percentage below.
         L.wide_col_gap = 40;
         L.wide_col_w   = (c.width - 2 * L.margin - L.wide_col_gap) / 2;
@@ -620,6 +628,45 @@ static void refresh_ages(uint32_t now) {
     }
 }
 
+// On-screen pairing button (layouts with pair_btn_h > 0). Same effect as the
+// hold-PWR gesture: clear all bonds + owner and re-advertise. The pairing view
+// also shows whenever the host merely sleeps, so a stray tap must not wipe a
+// healthy bond: the first tap arms the button, a second tap within
+// PAIR_BTN_ARM_MS confirms. ui_tick_anim() disarms it / restores the caption.
+#define PAIR_BTN_ARM_MS   4000
+#define PAIR_BTN_DONE_MS  6000
+static lv_obj_t* pair_btn = nullptr;
+static lv_obj_t* pair_btn_lbl = nullptr;
+static uint8_t   pair_btn_state = 0;       // 0 idle / 1 armed / 2 done
+static uint32_t  pair_btn_ms = 0;
+
+static void pair_btn_set_state(uint8_t st) {
+    pair_btn_state = st;
+    pair_btn_ms = lv_tick_get();
+    lv_label_set_text(pair_btn_lbl, st == 0 ? "Reset pairing"
+                                  : st == 1 ? "Tap again to confirm"
+                                            : "Cleared - connect from host");
+    lv_obj_set_style_bg_color(pair_btn, st == 1 ? COL_ACCENT : COL_PANEL, 0);
+    lv_obj_set_style_text_color(pair_btn_lbl, st == 2 ? COL_DIM : COL_TEXT, 0);
+}
+
+static void pair_btn_cb(lv_event_t* e) {
+    (void)e;
+    if (pair_btn_state == 0) {
+        pair_btn_set_state(1);
+    } else if (pair_btn_state == 1) {
+        ble_clear_bonds();
+        pair_btn_set_state(2);
+    }
+}
+
+static void pair_btn_tick(uint32_t now) {
+    if (!pair_btn || pair_btn_state == 0) return;
+    if (now - pair_btn_ms >= (pair_btn_state == 1 ? PAIR_BTN_ARM_MS : PAIR_BTN_DONE_MS)) {
+        pair_btn_set_state(0);
+    }
+}
+
 // Pairing hint — shown when disconnected so the screen isn't empty and the
 // user knows how to (re)pair. Wording matches the 3-second release gesture.
 static void build_pair_group(lv_obj_t* parent) {
@@ -649,6 +696,25 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_obj_set_style_text_font(l3, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l3, COL_DIM, 0);
     lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, L.pair_y3);
+
+    if (L.pair_btn_h > 0) {
+        lv_label_set_text(l2, "or hold the BOOT button");
+        // No EVENT_BUBBLE: a tap here must not also flip to the splash.
+        pair_btn = lv_obj_create(pair_group);
+        lv_obj_set_size(pair_btn, L.pair_btn_w, L.pair_btn_h);
+        lv_obj_align(pair_btn, LV_ALIGN_TOP_MID, 0, L.pair_btn_y);
+        lv_obj_set_style_bg_opa(pair_btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(pair_btn, L.pair_btn_h / 2, 0);
+        lv_obj_set_style_border_width(pair_btn, 2, 0);
+        lv_obj_set_style_border_color(pair_btn, COL_ACCENT, 0);
+        lv_obj_set_style_pad_all(pair_btn, 0, 0);
+        lv_obj_clear_flag(pair_btn, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(pair_btn, pair_btn_cb, LV_EVENT_SHORT_CLICKED, NULL);
+        pair_btn_lbl = lv_label_create(pair_btn);
+        lv_obj_set_style_text_font(pair_btn_lbl, L.pair_btn_font, 0);
+        lv_obj_center(pair_btn_lbl);
+        pair_btn_set_state(0);
+    }
 
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);  // ui_update_ble_status decides
 }
@@ -1002,6 +1068,7 @@ void ui_tick_anim(void) {
     if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
 
     uint32_t now = lv_tick_get();
+    pair_btn_tick(now);
 
     // Wide layout: keep the "updated N ago" lines counting between payloads.
     if (L.wide && acct_fetch_ms && now - age_last_ms >= AGE_REFRESH_MS) {

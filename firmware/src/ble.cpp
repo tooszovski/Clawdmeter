@@ -370,6 +370,18 @@ void ble_tick(void) {
         need_advertise = false;
         start_advertising();
     }
+    // Advertising watchdog: with nobody connected the board must be
+    // advertising, or the bonded host can never find it again (seen on
+    // hardware: UI sat on "Waiting" for hours until a reset). Re-arm it.
+    static uint32_t adv_check_ms = 0;
+    if (millis() - adv_check_ms >= 10000) {
+        adv_check_ms = millis();
+        if (server && server->getConnectedCount() == 0 &&
+            !NimBLEDevice::getAdvertising()->isAdvertising()) {
+            Serial.println("BLE: not advertising while disconnected — restarting");
+            start_advertising();
+        }
+    }
     // Deferred one-shot supervision-timeout pushback (see onConnParamsUpdate).
     if (param_fix_handle != CONN_HANDLE_NONE &&
         (int32_t)(millis() - param_fix_at_ms) >= 0) {
