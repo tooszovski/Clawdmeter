@@ -697,6 +697,12 @@ STATE_DIR = Path.home() / ".local" / "state" / "clawdmeter"
 LABEL_MAX = 12
 
 
+def cache_expired(cache: "CachedPayload | None", now: float) -> bool:
+    """True when the last good payload is older than STALE_GRACE and should be
+    replaced by "No data" rather than shown as if it were current."""
+    return cache is not None and now - cache.built_at > STALE_GRACE
+
+
 def read_config_value(key: str, default: str = "") -> str:
     """Read one `key = value` option from the config file (last wins)."""
     val = default
@@ -832,6 +838,13 @@ def read_statusline_payload(now: float | None = None) -> tuple[dict | None, bool
 # along as "m"/"mw"/"mwr". When a statusline file exists for the account its
 # exact resets_at epochs are preferred over the parsed clock text.
 USAGE_CMD_TIMEOUT = 60
+# How long the loop keeps re-showing the last good numbers while polls keep
+# missing (timeouts, no answer) before it admits "No data" to the device.
+STALE_GRACE = 600
+# `claude -p /usage` did not answer in time. The token is most likely fine and
+# the CLI was merely starved (launchd agents run below interactive priority, so
+# one heavy job on the host is enough) -> treat as a transient miss, not "dead".
+USAGE_TRANSIENT = object()
 _USAGE_LINE = re.compile(
     r"^Current (?P<kind>session|week \((?P<scope>[^)]+)\)):\s*(?P<pct>\d+)% used"
     r"(?:\s*·\s*resets\s+(?P<reset>.+?))?\s*$", re.M)
@@ -911,14 +924,19 @@ def account_label_for(config_dir: Path) -> tuple[str, str]:
     return key, label
 
 
-def run_claude_usage(config_dir: Path) -> str | None:
-    """Run `claude -p /usage --output-format json` for one config dir; return the report text."""
+def run_claude_usage(config_dir: Path) -> str | object | None:
+    """Run `claude -p /usage --output-format json` for one config dir; return the
+    report text, USAGE_TRANSIENT on timeout, None when there is no usable report."""
     exe = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
     env = dict(os.environ, CLAUDE_CONFIG_DIR=str(config_dir))
     try:
         r = subprocess.run([exe, "-p", "/usage", "--output-format", "json"],
                            capture_output=True, text=True, timeout=USAGE_CMD_TIMEOUT,
                            env=env, cwd=str(Path.home()))
+    except subprocess.TimeoutExpired:
+        log(f"/usage timed out after {USAGE_CMD_TIMEOUT}s for {config_dir} "
+            "(host busy?); keeping last numbers")
+        return USAGE_TRANSIENT
     except (OSError, subprocess.SubprocessError) as e:
         log(f"/usage failed for {config_dir}: {e}")
         return None
@@ -949,8 +967,12 @@ def read_usage_payload(now: float | None = None) -> tuple[dict | None, bool]:
     agent_states = read_agent_states(now)
     accounts = []
     keys: list[str] = []
+    transient = False
     for d in dirs:
         text = run_claude_usage(d)
+        if text is USAGE_TRANSIENT:
+            transient = True
+            continue
         parsed = parse_usage_text(text, now) if text else None
         if not parsed:
             log(f"No usage windows from {d}")
@@ -982,7 +1004,9 @@ def read_usage_payload(now: float | None = None) -> tuple[dict | None, bool]:
         accounts.append(acct)
         keys.append(key)
     if not accounts:
-        return None, True
+        # Dead only when every dir gave a definite non-answer; a timed-out dir
+        # means "ask again next cycle", so the loop keeps the cached payload.
+        return None, not transient
 
     order = read_accounts_order()
     def _rank(i: int) -> tuple[int, str]:
@@ -1220,10 +1244,22 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                     if await session.write_payload({"ok": False}):
                         last_poll = time.time()
                         cache = None
+                elif cache_expired(cache, time.time()):
+                    # Transient misses have outlived STALE_GRACE: stop re-showing
+                    # numbers that are no longer true and let the device idle.
+                    log(f"No answer for {STALE_GRACE}s; signalling no-data to device")
+                    if await session.write_payload({"ok": False}):
+                        last_poll = time.time()
+                        cache = None
                 else:
                     # Transient poll failure (a live token that didn't answer this
-                    # cycle) -> stay silent and retry next tick.
-                    log("No usable config dir this cycle")
+                    # cycle) -> stay silent, keep the cached numbers, retry next
+                    # poll. Throttle to one retry per POLL_INTERVAL: for the
+                    # `usage` source each retry spawns the CLI (seconds to
+                    # minutes under load), so a per-tick retry would only pile
+                    # onto the very load that made it miss.
+                    log("No usable config dir this cycle; keeping last numbers")
+                    last_poll = time.time()
 
             try:
                 await asyncio.wait_for(session.refresh_requested.wait(), timeout=TICK)
