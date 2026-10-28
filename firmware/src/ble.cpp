@@ -190,6 +190,14 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         Serial.printf("BLE: connparams itvl=%u(%.2fms) lat=%u timeout=%u(%ums)\n",
             info.getConnInterval(), info.getConnInterval() * 1.25f,
             info.getConnLatency(), info.getConnTimeout(), info.getConnTimeout() * 10);
+        // Ask the central to pair/encrypt. macOS no longer starts pairing on its
+        // own from the HID Connect button, and RX writes are dropped unless the
+        // link is encrypted, so an unbonded link would sit connected with no data.
+        if (!info.isEncrypted()) {
+            int rc = 0;
+            bool ok = NimBLEDevice::startSecurity(info.getConnHandle(), &rc);
+            Serial.printf("BLE: security request sent=%d rc=%d\n", ok ? 1 : 0, rc);
+        }
         // Keep advertising while a connection slot is still free so a second
         // central (e.g. the host daemon alongside an OS-held HID link) can
         // discover and connect. NimBLE auto-stops advertising on each accept.

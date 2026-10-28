@@ -289,7 +289,30 @@ async def retrieve_connected_macos(skip_addr: str | None = None):
         if _ok(p) and p.name() == DEVICE_NAME:
             return _wrap(p)
 
+    # 3. The peripheral we connected to before, by its CoreBluetooth identifier.
+    # Bonded but not held: newer macOS no longer auto-connects the HID (and
+    # shows no Connect button), so we dial the known identifier ourselves.
+    # Still no scanning by name — only a device this Mac already knows.
+    known = load_cached_address()
+    if known and "-" in known and known != skip_addr:
+        from Foundation import NSUUID
+
+        found = cm.retrievePeripheralsWithIdentifiers_(
+            [NSUUID.alloc().initWithUUIDString_(known)]
+        )
+        for p in found or []:
+            log(f"Not held by OS; dialing known peripheral {p.name()!r} [{known}]")
+            return BLEDevice(known, p.name(), (p, manager))
+
     return None
+
+
+def save_cached_address(addr: str) -> None:
+    try:
+        SAVED_ADDR_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SAVED_ADDR_FILE.write_text(addr + "\n")
+    except OSError as e:
+        log(f"Could not cache address: {e}")
 
 
 async def discover_target(skip_addr: str | None = None):
@@ -1197,6 +1220,8 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
         return False
 
     log("Connected")
+    if sys.platform == "darwin" and not isinstance(target, str):
+        save_cached_address(target.address)  # lets discover_target re-dial it if macOS lets go
     session = Session(client)
     await session.setup_refresh_subscription()
 
